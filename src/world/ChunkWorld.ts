@@ -32,10 +32,17 @@ function getOrCreateMat(scene: Scene, name: string, diffuse: Color3, emissive?: 
   return m;
 }
 
-function createBuilding(scene: Scene, parent: TransformNode, rng: () => number, x: number, z: number) {
-  const w = 4 + rng() * 6;
-  const d = 4 + rng() * 6;
-  const h = 6 + rng() * 20;
+function createBuilding(
+  scene: Scene,
+  parent: TransformNode,
+  rng: () => number,
+  x: number,
+  z: number,
+  dims?: { w: number; d: number; h: number }
+) {
+  const w = dims?.w ?? (4 + rng() * 6);
+  const d = dims?.d ?? (4 + rng() * 6);
+  const h = dims?.h ?? (6 + rng() * 20);
 
   // Building root
   const root = new TransformNode("bRoot", scene);
@@ -167,7 +174,7 @@ class Chunk {
 
     // A simple "road cross" so chunks look like a city grid
     const roadMat = getOrCreateMat(scene, "mat_road", new Color3(0.12, 0.12, 0.12));
-    const roadW = 5;
+    const roadW = 12;
     const s = WorldConfig.CHUNK_SIZE;
 
     const roadX = MeshBuilder.CreateBox("roadX", { width: s, depth: roadW, height: 0.05 }, scene);
@@ -180,30 +187,229 @@ class Chunk {
     roadZ.position.y = 0.025;
     roadZ.material = roadMat;
 
-    // Buildings: place on 2x2 blocks around the road cross
+    // Sidewalks (NPCs can walk here)
+    const sidewalkW = 4.0;
+    const sidewalkMat = getOrCreateMat(scene, "mat_sidewalk", new Color3(0.42, 0.42, 0.44));
+    const halfRoad = roadW * 0.5;
+    const sideH = 0.04;
+
+    const sideX1 = MeshBuilder.CreateBox("sideX1", { width: s, depth: sidewalkW, height: sideH }, scene);
+    sideX1.parent = this.root;
+    sideX1.position = new Vector3(0, sideH * 0.5, halfRoad + sidewalkW * 0.5);
+    sideX1.material = sidewalkMat;
+
+    const sideX2 = sideX1.clone("sideX2") as Mesh;
+    sideX2.parent = this.root;
+    sideX2.position.z = -(halfRoad + sidewalkW * 0.5);
+
+    const sideZ1 = MeshBuilder.CreateBox("sideZ1", { width: sidewalkW, depth: s, height: sideH }, scene);
+    sideZ1.parent = this.root;
+    sideZ1.position = new Vector3(halfRoad + sidewalkW * 0.5, sideH * 0.5, 0);
+    sideZ1.material = sidewalkMat;
+
+    const sideZ2 = sideZ1.clone("sideZ2") as Mesh;
+    sideZ2.parent = this.root;
+    sideZ2.position.x = -(halfRoad + sidewalkW * 0.5);
+
+
+
+    // --- Road markings / crosswalk / traffic lights (cheap city feel) ---
+    const markWhite = getOrCreateMat(scene, "mat_road_mark_white", new Color3(0.92, 0.92, 0.92), new Color3(0.55, 0.55, 0.55));
+    const markYellow = getOrCreateMat(scene, "mat_road_mark_yellow", new Color3(0.92, 0.82, 0.20), new Color3(0.55, 0.48, 0.10));
+    const poleMat = getOrCreateMat(scene, "mat_signal_pole", new Color3(0.10, 0.10, 0.10));
+    const lightRed = getOrCreateMat(scene, "mat_signal_red", new Color3(0.15, 0.02, 0.02), new Color3(0.95, 0.10, 0.10));
+    const lightGreen = getOrCreateMat(scene, "mat_signal_green", new Color3(0.02, 0.15, 0.02), new Color3(0.12, 0.95, 0.18));
+
+    const markH = 0.012;
+    const lineW = 0.22;
+
+    // Center lines (yellow)
+    const cLineX = MeshBuilder.CreateBox("centerLineX", { width: s, depth: lineW, height: markH }, scene);
+    cLineX.parent = this.root;
+    cLineX.position = new Vector3(0, 0.05 + markH * 0.5, 0);
+    cLineX.material = markYellow;
+
+    const cLineZ = MeshBuilder.CreateBox("centerLineZ", { width: lineW, depth: s, height: markH }, scene);
+    cLineZ.parent = this.root;
+    cLineZ.position = new Vector3(0, 0.05 + markH * 0.5, 0);
+    cLineZ.material = markYellow;
+
+    // Lane separators (white) for 4 lanes total (2 each direction)
+    const laneOff = roadW * 0.25; // between lanes per direction
+    const edgeOff = roadW * 0.5 - 0.35; // road edge highlight
+
+    const laneX1 = MeshBuilder.CreateBox("laneX1", { width: s, depth: lineW, height: markH }, scene);
+    laneX1.parent = this.root;
+    laneX1.position = new Vector3(0, 0.05 + markH * 0.5, laneOff);
+    laneX1.material = markWhite;
+
+    const laneX2 = laneX1.clone("laneX2") as Mesh;
+    laneX2.parent = this.root;
+    laneX2.position.z = -laneOff;
+
+    const edgeX1 = laneX1.clone("edgeX1") as Mesh;
+    edgeX1.parent = this.root;
+    edgeX1.position.z = edgeOff;
+
+    const edgeX2 = laneX1.clone("edgeX2") as Mesh;
+    edgeX2.parent = this.root;
+    edgeX2.position.z = -edgeOff;
+
+    const laneZ1 = MeshBuilder.CreateBox("laneZ1", { width: lineW, depth: s, height: markH }, scene);
+    laneZ1.parent = this.root;
+    laneZ1.position = new Vector3(laneOff, 0.05 + markH * 0.5, 0);
+    laneZ1.material = markWhite;
+
+    const laneZ2 = laneZ1.clone("laneZ2") as Mesh;
+    laneZ2.parent = this.root;
+    laneZ2.position.x = -laneOff;
+
+    const edgeZ1 = laneZ1.clone("edgeZ1") as Mesh;
+    edgeZ1.parent = this.root;
+    edgeZ1.position.x = edgeOff;
+
+    const edgeZ2 = laneZ1.clone("edgeZ2") as Mesh;
+    edgeZ2.parent = this.root;
+    edgeZ2.position.x = -edgeOff;
+
+    // Crosswalks (zebra) near intersection (4 sides)
+    const cwOffset = 8;
+    const cwWidth = 6;
+    const cwStripeW = 0.55;
+    const cwStripeGap = 0.35;
+    const stripes = 9;
+
+    const makeCrosswalk = (centerX: number, centerZ: number, alongX: boolean) => {
+      // alongX=true => stripes extend in X (pedestrians cross Z)
+      for (let k = 0; k < stripes; k++) {
+        const t = (k - (stripes - 1) * 0.5) * (cwStripeW + cwStripeGap);
+        const w = alongX ? cwWidth : cwStripeW;
+        const d = alongX ? cwStripeW : cwWidth;
+        const stripe = MeshBuilder.CreateBox("cwStripe", { width: w, depth: d, height: markH }, scene);
+        stripe.parent = this.root;
+        stripe.position.y = 0.05 + markH * 0.5;
+        stripe.position.x = centerX + (alongX ? t : 0);
+        stripe.position.z = centerZ + (alongX ? 0 : t);
+        stripe.material = markWhite;
+      }
+    };
+
+    // Pedestrians cross the horizontal road (roadX) at x=±cwOffset (cross Z)
+    makeCrosswalk(cwOffset, 0, true);
+    makeCrosswalk(-cwOffset, 0, true);
+    // Pedestrians cross the vertical road (roadZ) at z=±cwOffset (cross X)
+    makeCrosswalk(0, cwOffset, false);
+    makeCrosswalk(0, -cwOffset, false);
+
+    // Simple traffic lights at 4 corners (static red/green for vibe)
+    const makeSignal = (x: number, z: number, green: boolean) => {
+      const pole = MeshBuilder.CreateBox("sigPole", { width: 0.22, depth: 0.22, height: 4.2 }, scene);
+      pole.parent = this.root;
+      pole.position = new Vector3(x, 2.1, z);
+      pole.material = poleMat;
+
+      const head = MeshBuilder.CreateBox("sigHead", { width: 0.42, depth: 0.28, height: 0.85 }, scene);
+      head.parent = this.root;
+      head.position = new Vector3(x, 3.55, z);
+      head.material = poleMat;
+
+      const lamp = MeshBuilder.CreateBox("sigLamp", { width: 0.22, depth: 0.05, height: 0.22 }, scene);
+      lamp.parent = this.root;
+      lamp.position = new Vector3(x, 3.55, z + 0.17);
+      lamp.material = green ? lightGreen : lightRed;
+    };
+
+    const corner = roadW * 0.5 + 1.3;
+    makeSignal(corner, corner, false);
+    makeSignal(-corner, corner, true);
+    makeSignal(corner, -corner, true);
+    makeSignal(-corner, -corner, false);
+
+    // Buildings: place ONLY on buildable land (green lots), never on sidewalks/roads
     const block = s / 2;
     const margin = 10;
 
-    const spots = [
-      { x: -block / 2, z: -block / 2 },
-      { x: block / 2, z: -block / 2 },
-      { x: -block / 2, z: block / 2 },
-      { x: block / 2, z: block / 2 },
-    ];
+    // Buildable lots (1 per quadrant)
+    const lotMat = getOrCreateMat(scene, "mat_lot", new Color3(0.18, 0.28, 0.16));
+    const lotSetback = (roadW * 0.5) + sidewalkW + 2.0; // keep buildings away from sidewalks
+    const lotMargin = 6.0;
 
-    for (const sp of spots) {
-      // Each block gets 2-4 buildings
-      const count = 1 + Math.floor(rng() * 3); // 1-3
+    const lotMax = block - lotMargin;
+    const lotSize = Math.max(8, lotMax - lotSetback);
+    const lotH = 0.03;
+
+    type Lot = { minX: number; maxX: number; minZ: number; maxZ: number };
+    const lots: Lot[] = [];
+
+    const makeLot = (sx: number, sz: number) => {
+      // sx/sz are ±1 quadrant signs
+      const minX = sx > 0 ? lotSetback : -lotMax;
+      const maxX = sx > 0 ? lotMax : -lotSetback;
+      const minZ = sz > 0 ? lotSetback : -lotMax;
+      const maxZ = sz > 0 ? lotMax : -lotSetback;
+
+      const cxLot = (minX + maxX) * 0.5;
+      const czLot = (minZ + maxZ) * 0.5;
+
+      const lot = MeshBuilder.CreateBox("buildableLot", { width: lotSize, depth: lotSize, height: lotH }, scene);
+      lot.parent = this.root;
+      lot.position = new Vector3(cxLot, lotH * 0.5, czLot);
+      lot.material = lotMat;
+      lot.isPickable = false;
+
+      lots.push({ minX, maxX, minZ, maxZ });
+    };
+
+    makeLot(-1, -1);
+    makeLot(1, -1);
+    makeLot(-1, 1);
+    makeLot(1, 1);
+
+    // Non-overlap placement (AABB)
+    type Footprint = { x: number; z: number; w: number; d: number };
+    const placed: Footprint[] = [];
+    const pad = 1.6;
+
+    const overlaps = (a: Footprint, b: Footprint) => {
+      return (
+        Math.abs(a.x - b.x) < (a.w + b.w) * 0.5 + pad &&
+        Math.abs(a.z - b.z) < (a.d + b.d) * 0.5 + pad
+      );
+    };
+
+    const tryPlaceInLot = (lot: Lot, w: number, d: number) => {
+      for (let t = 0; t < 28; t++) {
+        const x = (lot.minX + w * 0.5) + ((lot.maxX - w * 0.5) - (lot.minX + w * 0.5)) * rng();
+        const z = (lot.minZ + d * 0.5) + ((lot.maxZ - d * 0.5) - (lot.minZ + d * 0.5)) * rng();
+        const fp = { x, z, w, d };
+        let ok = true;
+        for (const p of placed) {
+          if (overlaps(fp, p)) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) continue;
+        placed.push(fp);
+        return { x, z };
+      }
+      return null;
+    };
+
+    for (const lot of lots) {
+      const count = 2 + Math.floor(rng() * 4); // 2-5 per lot
       for (let i = 0; i < count; i++) {
-        const bx = sp.x + (rng() - 0.5) * (block - margin);
-        const bz = sp.z + (rng() - 0.5) * (block - margin);
-        const built = createBuilding(scene, this.root, rng, bx, bz);
-        // Add thin instances for this building
+        const w = 5 + rng() * 8;
+        const d = 5 + rng() * 8;
+        const h = 8 + rng() * 24;
+
+        const pos = tryPlaceInLot(lot, w, d);
+        if (!pos) continue;
+
+        const built = createBuilding(scene, this.root, rng, pos.x, pos.z, { w, d, h });
         if (built.windows.length) {
           this.windowMesh.thinInstanceAdd(built.windows);
         }
-
-        // Store LOD handles
         const center = new Vector3(
           this.root.position.x + built.root.position.x,
           0,

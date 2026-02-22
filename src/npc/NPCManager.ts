@@ -73,16 +73,17 @@ export class NPCManager {
   private handoffAcc = 0;
   private readonly HANDOFF_HZ = 6;
   private readonly HANDOFF_DIST = 6;
-	// Soft budget for how many thin->sim promotions we do per handoff step.
-	// 가까이 접근한 NPC는 반드시 고퀄(Sim)로 바뀌어야 하므로, FORCE_SIM_RADIUS 안에서는 이 제한을 무시한다.
-	private readonly HANDOFF_MAX_PER_STEP = 18;
-	private readonly FORCE_SIM_RADIUS = 12; // meters
+  private readonly HANDOFF_MAX_PER_STEP = 100;
   private readonly CROWD_SUPPRESS_SEC = 1.0;
   private readonly CROWD_FADE_OUT_SEC = 0.22;
   private readonly SIM_FADE_IN_SEC = 0.28;
   private readonly SIM_MOVE_RAMP_SEC = 0.30;
-  private readonly ROAD_W = 5; // must match ChunkWorld roadW
-  private readonly ROAD_THRESHOLD = 5.0; // roadW/2 + sidewalk margin
+  private readonly ROAD_W = 12; // must match ChunkWorld roadW
+  private readonly SIDEWALK_W = 4.0; // must match ChunkWorld sidewalkW
+  private readonly ROAD_THRESHOLD = 10.5; // roadW/2 + sidewalkW + small margin
+  private readonly CROSSWALK_OFFSET = 8; // must match ChunkWorld cwOffset
+  private readonly CROSSWALK_WIDTH = 6; // must match ChunkWorld cwWidth
+  private readonly CROSSWALK_DEPTH = 12; // equals ROAD_W, pedestrian crossing span
   private readonly CROWD_FADE_IN_SPEED = 3.5;
 
   constructor(scene: Scene) {
@@ -282,6 +283,13 @@ export class NPCManager {
         }
       }
 
+
+      // Keep pedestrians off vehicle lanes (roads), allow only sidewalks + crosswalk rectangles.
+      {
+        const p = this.projectToWalkable(npc.root.position.x, npc.root.position.z);
+        npc.root.position.x = p.x;
+        npc.root.position.z = p.z;
+      }
       npc.moveRampLeft = Math.max(0, npc.moveRampLeft - dt);
 
       npc.yaw = this.lerpAngle(npc.yaw, npc.desiredYaw, this.clamp(dt * 10, 0, 1));
@@ -317,41 +325,10 @@ export class NPCManager {
     const s = Math.sin(t * freq + npc.phase);
     const c = Math.cos(t * freq + npc.phase);
 
-    // --- NPC animation feel upgrade: "foot planting" (cheap but effective)
-    // 1) Smoothly damp swing to 0 when stopping (avoid jittery leg swing at rest)
-    // 2) Fake "ground contact": lift foot only during forward swing and clamp foot above ground (y >= 0)
-    const stop = this.clamp((0.18 - walkR) / 0.18, 0, 1); // 0 when walking, 1 when almost stopped
-    const swingMul = 1 - stop * stop;
-    const s2 = s * swingMul;
-
-    const targetArmL = s2 * ampArm;
-    const targetArmR = -s2 * ampArm;
-    const targetLegL = -s2 * ampLeg;
-    const targetLegR = s2 * ampLeg;
-
-    // Smooth damping toward target (helps stop/landing feel)
-    const k = Math.min(1, safeDt * 16);
-    npc.armL.rotation.x += (targetArmL - npc.armL.rotation.x) * k;
-    npc.armR.rotation.x += (targetArmR - npc.armR.rotation.x) * k;
-    npc.legL.rotation.x += (targetLegL - npc.legL.rotation.x) * k;
-    npc.legR.rotation.x += (targetLegR - npc.legR.rotation.x) * k;
-
-    // Foot lift: only on forward swing (no "digging" through the floor).
-    // These are blocky legs, so we approximate lift by moving the whole leg mesh in Y.
-    const LEG_H = 0.78;
-    const LEG_BASE_Y = LEG_H * 0.5; // 0.39
-    const liftAmp = (0.08 + 0.03 * runFactor) * walkR;
-    const liftL = Math.max(0, s2) * liftAmp;
-    const liftR = Math.max(0, -s2) * liftAmp;
-
-    const targetLegYL = LEG_BASE_Y + liftL;
-    const targetLegYR = LEG_BASE_Y + liftR;
-    npc.legL.position.y += (targetLegYL - npc.legL.position.y) * k;
-    npc.legR.position.y += (targetLegYR - npc.legR.position.y) * k;
-
-    // Clamp: foot must not go below ground (y >= 0). For a centered box, bottom is (pos.y - LEG_H/2).
-    npc.legL.position.y = Math.max(LEG_BASE_Y, npc.legL.position.y);
-    npc.legR.position.y = Math.max(LEG_BASE_Y, npc.legR.position.y);
+    npc.armL.rotation.x = s * ampArm;
+    npc.armR.rotation.x = -s * ampArm;
+    npc.legL.rotation.x = -s * ampLeg;
+    npc.legR.rotation.x = s * ampLeg;
 
     const bob = (Math.abs(c) * (0.055 + 0.03 * runFactor)) * walkR;
     npc.torso.position.y = 0.85 + bob;
@@ -433,35 +410,11 @@ export class NPCManager {
       }
     }
 
-		// Promote multiple per tick so sprinting doesn't leave half the crowd popping away.
-		// Soft cap is scaled by speed, but we *guarantee* conversion in the close range.
-		const speedFactor = this.clamp(this.playerSpeed / 7.5, 0, 1);
-		let promotesLeft = Math.floor(this.lerp(6, this.HANDOFF_MAX_PER_STEP, speedFactor));
+    // Promote multiple per tick so sprinting doesn't leave half the crowd popping away.
+    const speedFactor = this.clamp(this.playerSpeed / 7.5, 0, 1);
+    let promotesLeft = Math.floor(this.lerp(6, this.HANDOFF_MAX_PER_STEP, speedFactor));
 
-		// Force promote: very close NPCs must always become Sim (high quality).
-		const forceR = this.FORCE_SIM_RADIUS;
-		const forceR2 = forceR * forceR;
-		let forceNeed = 0;
-		for (let i = 0; i < this.crowd.count; i++) {
-			if (this.crowd.suppressLeft[i] > 0) continue;
-			if (this.crowd.fadeOutLeft[i] > 0) continue;
-			if (this.crowd.fadeMul[i] < 0.05) continue;
-			const x = this.crowd.pos[i * 3 + 0];
-			const z = this.crowd.pos[i * 3 + 2];
-			const dx = x - playerPos.x;
-			const dz = z - playerPos.z;
-			const d2 = dx * dx + dz * dz;
-			if (d2 <= forceR2) {
-				// keep them from being teleported away while we promote
-				this.crowd.lockLeft[i] = Math.max(this.crowd.lockLeft[i], 1.2);
-				forceNeed++;
-			}
-		}
-
-		// We can only meaningfully promote up to the sim pool size per step.
-		promotesLeft = Math.min(this.sim.length, Math.max(promotesLeft, forceNeed));
-
-		const pickCandidate = (preferRoad: boolean, requireSpacing: boolean, forceOnly: boolean) => {
+    const pickCandidate = (preferRoad: boolean, requireSpacing: boolean) => {
       let bestIdx = -1;
       let bestD2 = 1e18;
 
@@ -474,9 +427,8 @@ export class NPCManager {
         const z = this.crowd.pos[i * 3 + 2];
         const dx = x - playerPos.x;
         const dz = z - playerPos.z;
-				const d2 = dx * dx + dz * dz;
-				if (d2 > convertR2) continue;
-				if (forceOnly && d2 > forceR2) continue;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > convertR2) continue;
 
         if (preferRoad && !this.isNearRoad(x, z)) continue;
 
@@ -499,15 +451,13 @@ export class NPCManager {
       return bestIdx;
     };
 
-		while (promotesLeft-- > 0) {
-			// Pass 0: hard guarantee very-close NPCs convert first
-			let bestIdx = pickCandidate(false, false, true);
-			// Pass 1: prefer road + spacing (best look)
-			if (bestIdx < 0) bestIdx = pickCandidate(true, true, false);
-			// Pass 2: relax spacing but keep road preference
-			if (bestIdx < 0) bestIdx = pickCandidate(true, false, false);
-			// Pass 3: relax road constraint (guarantee conversion near player)
-			if (bestIdx < 0) bestIdx = pickCandidate(false, false, false);
+    while (promotesLeft-- > 0) {
+      // Pass 1: prefer road + spacing (best look)
+      let bestIdx = pickCandidate(true, true);
+      // Pass 2: relax spacing but keep road preference
+      if (bestIdx < 0) bestIdx = pickCandidate(true, false);
+      // Pass 3: relax road constraint (guarantee conversion near player)
+      if (bestIdx < 0) bestIdx = pickCandidate(false, false);
       if (bestIdx < 0) break;
 
       // pick farthest sim to recycle (keeps sim cap stable but guarantees promotion near player)
@@ -632,9 +582,10 @@ export class NPCManager {
     const maxR = tier === "fake" ? WorldConfig.NPC_FAKE_RADIUS : WorldConfig.NPC_CROWD_RADIUS;
     for (let i = 0; i < group.count; i++) {
       const p = this.randomPointInRing(playerPos, minR, maxR);
-      group.pos[i * 3 + 0] = p.x;
+      const pp = this.projectToWalkable(p.x, p.z);
+      group.pos[i * 3 + 0] = pp.x;
       group.pos[i * 3 + 1] = 0;
-      group.pos[i * 3 + 2] = p.z;
+      group.pos[i * 3 + 2] = pp.z;
       group.yaw[i] = this.rand() * Math.PI * 2;
       group.speed[i] = tier === "crowd" ? 1.1 + this.rand() * 0.8 : 0.0;
       group.phase[i] = this.rand() * Math.PI * 2;
@@ -741,6 +692,9 @@ export class NPCManager {
           const p = this.randomPointInRing(playerPos, minR, maxR);
           x = p.x;
           z = p.z;
+          const ppT = this.projectToWalkable(x, z);
+          x = ppT.x;
+          z = ppT.z;
           group.yaw[i] = this.rand() * Math.PI * 2;
           group.pos[i * 3 + 0] = x;
           group.pos[i * 3 + 2] = z;
@@ -766,8 +720,9 @@ export class NPCManager {
         const sp = group.speed[i] * (1 + 0.8 * repel);
         x += Math.sin(yaw) * sp * logicStep;
         z += Math.cos(yaw) * sp * logicStep;
-        group.pos[i * 3 + 0] = x;
-        group.pos[i * 3 + 2] = z;
+        const pp = this.projectToWalkable(x, z);
+        group.pos[i * 3 + 0] = pp.x;
+        group.pos[i * 3 + 2] = pp.z;
       }
     }
 
@@ -820,7 +775,19 @@ export class NPCManager {
   }
 
   private randomWalkTarget(center: Vector3, radius: number) {
+    // Prefer sidewalks; if we land on a road lane, project to nearest walkable (or crosswalk).
+    for (let k = 0; k < 6; k++) {
+      const p = this.randomPointInRing(center, 6, radius);
+      const pp = this.projectToWalkable(p.x, p.z);
+      p.x = pp.x;
+      p.z = pp.z;
+      p.y = 0;
+      return p;
+    }
     const p = this.randomPointInRing(center, 6, radius);
+    const pp = this.projectToWalkable(p.x, p.z);
+    p.x = pp.x;
+    p.z = pp.z;
     p.y = 0;
     return p;
   }
@@ -847,6 +814,7 @@ export class NPCManager {
   }
 
   private isNearRoad(x: number, z: number) {
+    // "Near road" means close to the road corridor (sidewalk vibe), not necessarily inside the lanes.
     const s = WorldConfig.CHUNK_SIZE;
     const cx = Math.round(x / s);
     const cz = Math.round(z / s);
@@ -854,6 +822,101 @@ export class NPCManager {
     const lz = z - cz * s;
     const t = this.ROAD_THRESHOLD;
     return Math.abs(lx) <= t || Math.abs(lz) <= t;
+  }
+
+  private isInCrosswalkLocal(lx: number, lz: number) {
+    const off = this.CROSSWALK_OFFSET;
+    const halfW = this.CROSSWALK_WIDTH * 0.5;
+    const halfRoad = this.ROAD_W * 0.5;
+
+    // Crosswalks across roadX (pedestrians cross Z) at x = ±off
+    const inRoadXBand = Math.abs(lz) <= halfRoad;
+    const inCWX =
+      inRoadXBand && (Math.abs(lx - off) <= halfW || Math.abs(lx + off) <= halfW);
+
+    // Crosswalks across roadZ (pedestrians cross X) at z = ±off
+    const inRoadZBand = Math.abs(lx) <= halfRoad;
+    const inCWZ =
+      inRoadZBand && (Math.abs(lz - off) <= halfW || Math.abs(lz + off) <= halfW);
+
+    return inCWX || inCWZ;
+  }
+
+  private projectToWalkable(x: number, z: number) {
+    // Chunk-local classification:
+    // 1) Road (vehicles only)           => forbidden
+    // 2) Crosswalk (NPC allowed)        => allowed
+    // 3) Sidewalk (NPC allowed)         => allowed
+    // 4) Buildable land (buildings only)=> forbidden for NPC
+    //
+    // This function projects any (x,z) to the nearest allowed point for NPCs:
+    // sidewalk strips or crosswalk rectangles.
+
+    const s = WorldConfig.CHUNK_SIZE;
+    const cx = Math.round(x / s);
+    const cz = Math.round(z / s);
+    const lx = x - cx * s;
+    const lz = z - cz * s;
+
+    const halfRoad = this.ROAD_W * 0.5;
+    const sw = this.SIDEWALK_W;
+
+    type Rect = { minX: number; maxX: number; minZ: number; maxZ: number };
+    const rects: Rect[] = [];
+
+    // Sidewalk bands along the two roads
+    rects.push({ minX: -s * 0.5, maxX: s * 0.5, minZ: halfRoad, maxZ: halfRoad + sw }); // +Z
+    rects.push({ minX: -s * 0.5, maxX: s * 0.5, minZ: -halfRoad - sw, maxZ: -halfRoad }); // -Z
+    rects.push({ minX: halfRoad, maxX: halfRoad + sw, minZ: -s * 0.5, maxZ: s * 0.5 }); // +X
+    rects.push({ minX: -halfRoad - sw, maxX: -halfRoad, minZ: -s * 0.5, maxZ: s * 0.5 }); // -X
+
+    // Crosswalk rectangles (allowed even though they are inside road corridor)
+    const cwHalf = this.CROSSWALK_WIDTH * 0.5;
+    rects.push({ minX: this.CROSSWALK_OFFSET - cwHalf, maxX: this.CROSSWALK_OFFSET + cwHalf, minZ: -halfRoad, maxZ: halfRoad }); // +X side
+    rects.push({ minX: -this.CROSSWALK_OFFSET - cwHalf, maxX: -this.CROSSWALK_OFFSET + cwHalf, minZ: -halfRoad, maxZ: halfRoad }); // -X side
+    rects.push({ minX: -halfRoad, maxX: halfRoad, minZ: this.CROSSWALK_OFFSET - cwHalf, maxZ: this.CROSSWALK_OFFSET + cwHalf }); // +Z side
+    rects.push({ minX: -halfRoad, maxX: halfRoad, minZ: -this.CROSSWALK_OFFSET - cwHalf, maxZ: -this.CROSSWALK_OFFSET + cwHalf }); // -Z side
+
+    const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+    const closestPointRect = (px: number, pz: number, r: Rect) => {
+      const cxp = clamp(px, r.minX, r.maxX);
+      const czp = clamp(pz, r.minZ, r.maxZ);
+      const dx = px - cxp;
+      const dz = pz - czp;
+      return { x: cxp, z: czp, d2: dx * dx + dz * dz };
+    };
+
+    // If already inside an allowed rect, keep it (just clamp to rect bounds)
+    for (const r of rects) {
+      if (lx >= r.minX && lx <= r.maxX && lz >= r.minZ && lz <= r.maxZ) {
+        return { x: cx * s + lx, z: cz * s + lz };
+      }
+    }
+
+    // Otherwise project to nearest rect (sidewalk or crosswalk)
+    let best = { x: lx, z: lz, d2: Number.POSITIVE_INFINITY };
+    for (const r of rects) {
+      const cpt = closestPointRect(lx, lz, r);
+      if (cpt.d2 < best.d2) best = cpt;
+    }
+
+    // Slight inward padding so we don't hover exactly on edges
+    const pad = 0.15;
+    let px = best.x;
+    let pz = best.z;
+
+    // Push a bit away from the road boundary when on sidewalk
+    // (prevents numeric jitter from bouncing between road and sidewalk)
+    if (Math.abs(pz) >= halfRoad && Math.abs(pz) <= halfRoad + sw + 1e-3 && Math.abs(px) > halfRoad) {
+      // corner area, leave as is
+    } else {
+      if (pz > halfRoad) pz = Math.max(pz, halfRoad + pad);
+      if (pz < -halfRoad) pz = Math.min(pz, -halfRoad - pad);
+      if (px > halfRoad) px = Math.max(px, halfRoad + pad);
+      if (px < -halfRoad) px = Math.min(px, -halfRoad - pad);
+    }
+
+    return { x: cx * s + px, z: cz * s + pz };
   }
 
   private clamp(v: number, a: number, b: number) {
