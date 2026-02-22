@@ -45,6 +45,7 @@ type ThinGroup = {
   fadeMul: Float32Array;
   fadeOutLeft: Float32Array;
   suppressLeft: Float32Array;
+  lockLeft: Float32Array; // prevents teleport/repel while pending handoff
   matrices: Float32Array;
   colors: Float32Array;
   count: number;
@@ -65,10 +66,17 @@ export class NPCManager {
   private seed = 1337;
   private scene: Scene;
 
+  private lastPlayerPos = new Vector3(Number.NaN, 0, Number.NaN);
+  private playerSpeed = 0;
+
   // Cross-fade / handoff tuning
   private handoffAcc = 0;
   private readonly HANDOFF_HZ = 6;
   private readonly HANDOFF_DIST = 6;
+	// Soft budget for how many thin->sim promotions we do per handoff step.
+	// 가까이 접근한 NPC는 반드시 고퀄(Sim)로 바뀌어야 하므로, FORCE_SIM_RADIUS 안에서는 이 제한을 무시한다.
+	private readonly HANDOFF_MAX_PER_STEP = 18;
+	private readonly FORCE_SIM_RADIUS = 12; // meters
   private readonly CROWD_SUPPRESS_SEC = 1.0;
   private readonly CROWD_FADE_OUT_SEC = 0.22;
   private readonly SIM_FADE_IN_SEC = 0.28;
@@ -112,6 +120,13 @@ export class NPCManager {
   }
 
   update(dt: number, playerPos: Vector3) {
+    // compute player planar speed for adaptive handoff budget
+    if (Number.isNaN(this.lastPlayerPos.x)) this.lastPlayerPos.copyFrom(playerPos);
+    const pdx = playerPos.x - this.lastPlayerPos.x;
+    const pdz = playerPos.z - this.lastPlayerPos.z;
+    const pdt = Math.max(1e-3, dt);
+    this.playerSpeed = Math.sqrt(pdx * pdx + pdz * pdz) / pdt;
+    this.lastPlayerPos.copyFrom(playerPos);
     this.ensureSimPopulation(playerPos);
     this.ensureThinPopulation(this.crowd, "crowd", playerPos);
     this.ensureThinPopulation(this.fake, "fake", playerPos);
@@ -302,10 +317,41 @@ export class NPCManager {
     const s = Math.sin(t * freq + npc.phase);
     const c = Math.cos(t * freq + npc.phase);
 
-    npc.armL.rotation.x = s * ampArm;
-    npc.armR.rotation.x = -s * ampArm;
-    npc.legL.rotation.x = -s * ampLeg;
-    npc.legR.rotation.x = s * ampLeg;
+    // --- NPC animation feel upgrade: "foot planting" (cheap but effective)
+    // 1) Smoothly damp swing to 0 when stopping (avoid jittery leg swing at rest)
+    // 2) Fake "ground contact": lift foot only during forward swing and clamp foot above ground (y >= 0)
+    const stop = this.clamp((0.18 - walkR) / 0.18, 0, 1); // 0 when walking, 1 when almost stopped
+    const swingMul = 1 - stop * stop;
+    const s2 = s * swingMul;
+
+    const targetArmL = s2 * ampArm;
+    const targetArmR = -s2 * ampArm;
+    const targetLegL = -s2 * ampLeg;
+    const targetLegR = s2 * ampLeg;
+
+    // Smooth damping toward target (helps stop/landing feel)
+    const k = Math.min(1, safeDt * 16);
+    npc.armL.rotation.x += (targetArmL - npc.armL.rotation.x) * k;
+    npc.armR.rotation.x += (targetArmR - npc.armR.rotation.x) * k;
+    npc.legL.rotation.x += (targetLegL - npc.legL.rotation.x) * k;
+    npc.legR.rotation.x += (targetLegR - npc.legR.rotation.x) * k;
+
+    // Foot lift: only on forward swing (no "digging" through the floor).
+    // These are blocky legs, so we approximate lift by moving the whole leg mesh in Y.
+    const LEG_H = 0.78;
+    const LEG_BASE_Y = LEG_H * 0.5; // 0.39
+    const liftAmp = (0.08 + 0.03 * runFactor) * walkR;
+    const liftL = Math.max(0, s2) * liftAmp;
+    const liftR = Math.max(0, -s2) * liftAmp;
+
+    const targetLegYL = LEG_BASE_Y + liftL;
+    const targetLegYR = LEG_BASE_Y + liftR;
+    npc.legL.position.y += (targetLegYL - npc.legL.position.y) * k;
+    npc.legR.position.y += (targetLegYR - npc.legR.position.y) * k;
+
+    // Clamp: foot must not go below ground (y >= 0). For a centered box, bottom is (pos.y - LEG_H/2).
+    npc.legL.position.y = Math.max(LEG_BASE_Y, npc.legL.position.y);
+    npc.legR.position.y = Math.max(LEG_BASE_Y, npc.legR.position.y);
 
     const bob = (Math.abs(c) * (0.055 + 0.03 * runFactor)) * walkR;
     npc.torso.position.y = 0.85 + bob;
@@ -372,10 +418,50 @@ export class NPCManager {
     const convertR = WorldConfig.NPC_SIM_RADIUS + this.HANDOFF_DIST;
     const convertR2 = convertR * convertR;
 
-    // Promote multiple per tick so sprinting doesn't leave half the crowd popping away.
-    let promotesLeft = this.HANDOFF_MAX_PER_STEP;
+    // Mark nearby crowd as "handoff candidates" so they won't be teleported away while the player runs into them.
+    for (let i = 0; i < this.crowd.count; i++) {
+      if (this.crowd.suppressLeft[i] > 0) continue;
+      if (this.crowd.fadeOutLeft[i] > 0) continue;
+      if (this.crowd.fadeMul[i] < 0.05) continue;
+      const x = this.crowd.pos[i * 3 + 0];
+      const z = this.crowd.pos[i * 3 + 2];
+      const dx = x - playerPos.x;
+      const dz = z - playerPos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 <= convertR2) {
+        this.crowd.lockLeft[i] = Math.max(this.crowd.lockLeft[i], 0.9);
+      }
+    }
 
-    const pickCandidate = (preferRoad: boolean, requireSpacing: boolean) => {
+		// Promote multiple per tick so sprinting doesn't leave half the crowd popping away.
+		// Soft cap is scaled by speed, but we *guarantee* conversion in the close range.
+		const speedFactor = this.clamp(this.playerSpeed / 7.5, 0, 1);
+		let promotesLeft = Math.floor(this.lerp(6, this.HANDOFF_MAX_PER_STEP, speedFactor));
+
+		// Force promote: very close NPCs must always become Sim (high quality).
+		const forceR = this.FORCE_SIM_RADIUS;
+		const forceR2 = forceR * forceR;
+		let forceNeed = 0;
+		for (let i = 0; i < this.crowd.count; i++) {
+			if (this.crowd.suppressLeft[i] > 0) continue;
+			if (this.crowd.fadeOutLeft[i] > 0) continue;
+			if (this.crowd.fadeMul[i] < 0.05) continue;
+			const x = this.crowd.pos[i * 3 + 0];
+			const z = this.crowd.pos[i * 3 + 2];
+			const dx = x - playerPos.x;
+			const dz = z - playerPos.z;
+			const d2 = dx * dx + dz * dz;
+			if (d2 <= forceR2) {
+				// keep them from being teleported away while we promote
+				this.crowd.lockLeft[i] = Math.max(this.crowd.lockLeft[i], 1.2);
+				forceNeed++;
+			}
+		}
+
+		// We can only meaningfully promote up to the sim pool size per step.
+		promotesLeft = Math.min(this.sim.length, Math.max(promotesLeft, forceNeed));
+
+		const pickCandidate = (preferRoad: boolean, requireSpacing: boolean, forceOnly: boolean) => {
       let bestIdx = -1;
       let bestD2 = 1e18;
 
@@ -388,8 +474,9 @@ export class NPCManager {
         const z = this.crowd.pos[i * 3 + 2];
         const dx = x - playerPos.x;
         const dz = z - playerPos.z;
-        const d2 = dx * dx + dz * dz;
-        if (d2 > convertR2) continue;
+				const d2 = dx * dx + dz * dz;
+				if (d2 > convertR2) continue;
+				if (forceOnly && d2 > forceR2) continue;
 
         if (preferRoad && !this.isNearRoad(x, z)) continue;
 
@@ -403,21 +490,24 @@ export class NPCManager {
           if (!ok) continue;
         }
 
-        if (d2 < bestD2) {
-          bestD2 = d2;
+        const score = d2 + (this.crowd.lockLeft[i] > 0 ? -1e12 : 0);
+        if (score < bestD2) {
+          bestD2 = score;
           bestIdx = i;
         }
       }
       return bestIdx;
     };
 
-    while (promotesLeft-- > 0) {
-      // Pass 1: prefer road + spacing (best look)
-      let bestIdx = pickCandidate(true, true);
-      // Pass 2: relax spacing but keep road preference
-      if (bestIdx < 0) bestIdx = pickCandidate(true, false);
-      // Pass 3: relax road constraint (guarantee conversion near player)
-      if (bestIdx < 0) bestIdx = pickCandidate(false, false);
+		while (promotesLeft-- > 0) {
+			// Pass 0: hard guarantee very-close NPCs convert first
+			let bestIdx = pickCandidate(false, false, true);
+			// Pass 1: prefer road + spacing (best look)
+			if (bestIdx < 0) bestIdx = pickCandidate(true, true, false);
+			// Pass 2: relax spacing but keep road preference
+			if (bestIdx < 0) bestIdx = pickCandidate(true, false, false);
+			// Pass 3: relax road constraint (guarantee conversion near player)
+			if (bestIdx < 0) bestIdx = pickCandidate(false, false, false);
       if (bestIdx < 0) break;
 
       // pick farthest sim to recycle (keeps sim cap stable but guarantees promotion near player)
@@ -471,6 +561,7 @@ export class NPCManager {
 
       // Fade out the Crowd instance smoothly; respawn is handled in updateThin after fade completes.
       this.crowd.fadeOutLeft[bestIdx] = this.CROWD_FADE_OUT_SEC;
+      this.crowd.lockLeft[bestIdx] = Math.max(this.crowd.lockLeft[bestIdx], this.CROWD_FADE_OUT_SEC + 0.2);
     }
   }
 
@@ -505,6 +596,7 @@ export class NPCManager {
     const fadeMul = new Float32Array(max);
     const suppressLeft = new Float32Array(max);
     const fadeOutLeft = new Float32Array(max);
+    const lockLeft = new Float32Array(max);
     const matrices = new Float32Array(max * 16);
     const colors = new Float32Array(max * 4);
 
@@ -522,6 +614,7 @@ export class NPCManager {
       fadeMul,
       fadeOutLeft,
       suppressLeft,
+      lockLeft,
       matrices,
       colors,
       count: 0,
@@ -548,6 +641,7 @@ export class NPCManager {
       group.fadeMul[i] = 1;
       group.fadeOutLeft[i] = 0;
       group.suppressLeft[i] = 0;
+      group.lockLeft[i] = 0;
     }
     this.writeThinBuffers(group, tier, playerPos);
     group.proto.thinInstanceCount = group.count;
@@ -561,6 +655,9 @@ export class NPCManager {
     group.refreshAcc += dt;
 
     for (let i = 0; i < group.count; i++) {
+      if (group.lockLeft && group.lockLeft[i] > 0) {
+        group.lockLeft[i] = Math.max(0, group.lockLeft[i] - dt);
+      }
       // Smooth fade-out (handoff) before suppress/respawn to avoid popping
       if (group.fadeOutLeft[i] > 0) {
         group.fadeOutLeft[i] -= dt;
@@ -569,7 +666,9 @@ export class NPCManager {
         if (group.fadeOutLeft[i] <= 0) {
           // After fade-out completes, suppress then respawn outside the Sim ring
           group.fadeMul[i] = 0;
+          group.lockLeft[i] = 0;
           group.suppressLeft[i] = this.CROWD_SUPPRESS_SEC;
+          group.lockLeft[i] = 0;
         }
         continue;
       }
@@ -583,6 +682,7 @@ export class NPCManager {
           group.pos[i * 3 + 2] = p.z;
           group.yaw[i] = this.rand() * Math.PI * 2;
           group.fadeMul[i] = 0;
+          group.lockLeft[i] = 0;
         }
       } else {
         group.fadeMul[i] = this.clamp(group.fadeMul[i] + dt * this.CROWD_FADE_IN_SPEED, 0, 1);
@@ -595,6 +695,9 @@ export class NPCManager {
         const minR = WorldConfig.NPC_CROWD_RADIUS + 12;
         const maxR = WorldConfig.NPC_FAKE_RADIUS;
         for (let i = 0; i < group.count; i++) {
+      if (group.lockLeft && group.lockLeft[i] > 0) {
+        group.lockLeft[i] = Math.max(0, group.lockLeft[i] - dt);
+      }
           const dx = group.pos[i * 3 + 0] - playerPos.x;
           const dz = group.pos[i * 3 + 2] - playerPos.z;
           const d2 = dx * dx + dz * dz;
@@ -618,7 +721,14 @@ export class NPCManager {
       const minR = WorldConfig.NPC_SIM_RADIUS + 2;
       const maxR = WorldConfig.NPC_CROWD_RADIUS;
       for (let i = 0; i < group.count; i++) {
+      if (group.lockLeft && group.lockLeft[i] > 0) {
+        group.lockLeft[i] = Math.max(0, group.lockLeft[i] - dt);
+      }
         if (group.suppressLeft[i] > 0) continue;
+        if (group.lockLeft && group.lockLeft[i] > 0) {
+          group.lockLeft[i] = Math.max(0, group.lockLeft[i] - logicStep);
+          continue;
+        }
 
         let x = group.pos[i * 3 + 0];
         let z = group.pos[i * 3 + 2];
