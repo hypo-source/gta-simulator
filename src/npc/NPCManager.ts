@@ -33,6 +33,8 @@ type SimNPC = {
   prevPos: Vector3;
   fade: number;
   moveRampLeft: number; // 0.3s ramp after spawn/handoff
+  waypoints: Vector3[];
+  wpIndex: number;
 };
 
 type ThinGroup = {
@@ -83,7 +85,6 @@ export class NPCManager {
   private readonly ROAD_THRESHOLD = 10.5; // roadW/2 + sidewalkW + small margin
   private readonly CROSSWALK_OFFSET = 9.5; // must match ChunkWorld crosswalk center (intersectionHalf + cwDepth/2 + offset)
   private readonly CROSSWALK_WIDTH = 3.2; // must match ChunkWorld cwDepth (thickness)
-  private readonly CROSSWALK_DEPTH = 12; // equals ROAD_W, pedestrian crossing span
   private readonly CROWD_FADE_IN_SPEED = 3.5;
 
   constructor(scene: Scene) {
@@ -209,31 +210,38 @@ export class NPCManager {
     legL.visibility = 0;
     legR.visibility = 0;
 
-    root.position.copyFrom(this.randomPointInRing(around, 8, WorldConfig.NPC_SIM_RADIUS));
+    root.position.copyFrom(this.sampleWalkableInRing(around, 8, WorldConfig.NPC_SIM_RADIUS));
     root.position.y = 0;
 
-    return {
-      root,
-      torso,
-      head,
-      armL,
-      armR,
-      legL,
-      legR,
-      target: this.randomWalkTarget(around, WorldConfig.NPC_SIM_RADIUS),
-      speed: 1.6 + this.rand() * 1.2,
-      phase: this.rand() * Math.PI * 2,
-      walk: 0,
-      mode: "walk",
-      idleLeft: 0,
-      idlePhase: this.rand() * Math.PI * 2,
-      desiredYaw: 0,
-      yaw: 0,
-      prevPos: root.position.clone(),
-      fade: 0,
-      moveRampLeft: this.SIM_MOVE_RAMP_SEC,
-    };
-  }
+  const npc: SimNPC = {
+
+    root,
+    torso,
+    head,
+    armL,
+    armR,
+    legL,
+    legR,
+    target: new Vector3(0, 0, 0),
+    speed: 1.6 + this.rand() * 1.2,
+    phase: this.rand() * Math.PI * 2,
+    walk: 0,
+    mode: "walk",
+    idleLeft: 0,
+    idlePhase: this.rand() * Math.PI * 2,
+    desiredYaw: 0,
+    yaw: 0,
+    prevPos: root.position.clone(),
+    fade: 0,
+    moveRampLeft: this.SIM_MOVE_RAMP_SEC,
+    waypoints: [],
+    wpIndex: 0,
+  };
+  // Plan first route so Sim never starts by spawning or targeting inside road lanes.
+  this.planWalkChain(npc, around, WorldConfig.NPC_SIM_RADIUS);
+  npc.prevPos.copyFrom(npc.root.position);
+  return npc;
+}
 
   private updateSim(dt: number, playerPos: Vector3) {
     for (const npc of this.sim) {
@@ -252,14 +260,14 @@ export class NPCManager {
         npc.legL.visibility = 0;
         npc.legR.visibility = 0;
         npc.root.position.y = 0;
-        npc.target = this.randomWalkTarget(playerPos, WorldConfig.NPC_SIM_RADIUS);
+        this.planWalkChain(npc, playerPos, WorldConfig.NPC_SIM_RADIUS);
       }
 
       if (npc.mode === "idle") {
         npc.idleLeft -= dt;
         if (npc.idleLeft <= 0) {
           npc.mode = "walk";
-          npc.target = this.randomWalkTarget(playerPos, WorldConfig.NPC_SIM_RADIUS);
+          this.planWalkChain(npc, playerPos, WorldConfig.NPC_SIM_RADIUS);
         }
       }
 
@@ -267,13 +275,20 @@ export class NPCManager {
         const to = npc.target.subtract(npc.root.position);
         const dist = Math.sqrt(to.x * to.x + to.z * to.z);
         if (dist < 0.7) {
-          if (this.rand() < 0.28) {
-            npc.mode = "idle";
-            npc.idleLeft = 0.8 + this.rand() * 2.2;
-            npc.idlePhase = this.rand() * Math.PI * 2;
-          } else {
-            npc.target = this.randomWalkTarget(playerPos, WorldConfig.NPC_SIM_RADIUS);
-          }
+
+	          // Waypoint chaining: if we are in the middle of a crosswalk route, consume waypoints first.
+	          if (npc.wpIndex < npc.waypoints.length) {
+	            npc.target.copyFrom(npc.waypoints[npc.wpIndex++]);
+	          } else {
+	            // Otherwise decide whether to idle or pick a new walking chain.
+	            if (this.rand() < 0.28) {
+	              npc.mode = "idle";
+	              npc.idleLeft = 0.8 + this.rand() * 2.2;
+	              npc.idlePhase = this.rand() * Math.PI * 2;
+	            } else {
+	              this.planWalkChain(npc, playerPos, WorldConfig.NPC_SIM_RADIUS);
+	            }
+	          }
         } else {
           const dirX = to.x / dist;
           const dirZ = to.z / dist;
@@ -499,7 +514,7 @@ export class NPCManager {
       sim.mode = "walk";
       sim.idleLeft = 0;
       sim.moveRampLeft = this.SIM_MOVE_RAMP_SEC;
-      sim.target = this.randomWalkTarget(playerPos, WorldConfig.NPC_SIM_RADIUS);
+      this.planWalkChain(sim, playerPos, WorldConfig.NPC_SIM_RADIUS);
 
       // Fade-in the promoted Sim NPC so it feels like detail increases instead of popping
       sim.fade = 0;
@@ -582,7 +597,7 @@ export class NPCManager {
     const minR = tier === "fake" ? WorldConfig.NPC_CROWD_RADIUS + 12 : WorldConfig.NPC_SIM_RADIUS + 2;
     const maxR = tier === "fake" ? WorldConfig.NPC_FAKE_RADIUS : WorldConfig.NPC_CROWD_RADIUS;
     for (let i = 0; i < group.count; i++) {
-      const p = this.randomPointInRing(playerPos, minR, maxR);
+      const p = this.sampleWalkableInRing(playerPos, minR, maxR);
       const pp = this.projectToWalkable(p.x, p.z);
       group.pos[i * 3 + 0] = pp.x;
       group.pos[i * 3 + 1] = 0;
@@ -629,7 +644,7 @@ export class NPCManager {
         if (group.suppressLeft[i] <= 0) {
           const minR = tier === "fake" ? WorldConfig.NPC_CROWD_RADIUS + 12 : WorldConfig.NPC_SIM_RADIUS + 2;
           const maxR = tier === "fake" ? WorldConfig.NPC_FAKE_RADIUS : WorldConfig.NPC_CROWD_RADIUS;
-          const p = this.randomPointInRing(playerPos, minR, maxR);
+          const p = this.sampleWalkableInRing(playerPos, minR, maxR);
           group.pos[i * 3 + 0] = p.x;
           group.pos[i * 3 + 2] = p.z;
           group.yaw[i] = this.rand() * Math.PI * 2;
@@ -654,7 +669,7 @@ export class NPCManager {
           const dz = group.pos[i * 3 + 2] - playerPos.z;
           const d2 = dx * dx + dz * dz;
           if (d2 > maxR * maxR || d2 < minR * minR) {
-            const p = this.randomPointInRing(playerPos, minR, maxR);
+            const p = this.sampleWalkableInRing(playerPos, minR, maxR);
             group.pos[i * 3 + 0] = p.x;
             group.pos[i * 3 + 2] = p.z;
             group.yaw[i] = this.rand() * Math.PI * 2;
@@ -690,7 +705,7 @@ export class NPCManager {
 
         const max2 = maxR * maxR * 1.96;
         if (d2 > max2) {
-          const p = this.randomPointInRing(playerPos, minR, maxR);
+          const p = this.sampleWalkableInRing(playerPos, minR, maxR);
           x = p.x;
           z = p.z;
           const ppT = this.projectToWalkable(x, z);
@@ -775,23 +790,119 @@ export class NPCManager {
     group.proto.thinInstanceSetBuffer("color", group.colors, 4, false);
   }
 
-  private randomWalkTarget(center: Vector3, radius: number) {
-    // Prefer sidewalks; if we land on a road lane, project to nearest walkable (or crosswalk).
-    for (let k = 0; k < 6; k++) {
-      const p = this.randomPointInRing(center, 6, radius);
-      const pp = this.projectToWalkable(p.x, p.z);
-      p.x = pp.x;
-      p.z = pp.z;
-      p.y = 0;
-      return p;
-    }
-    const p = this.randomPointInRing(center, 6, radius);
-    const pp = this.projectToWalkable(p.x, p.z);
-    p.x = pp.x;
-    p.z = pp.z;
-    p.y = 0;
-    return p;
+	private sampleWalkableInRing(center: Vector3, minR: number, maxR: number) {
+  const p = this.randomPointInRing(center, minR, maxR);
+  const pp = this.projectToWalkable(p.x, p.z);
+  p.x = pp.x;
+  p.z = pp.z;
+  p.y = 0;
+  return p;
+}
+
+private sampleSidewalkDest(center: Vector3, radius: number) {
+  // Sample until we land on a sidewalk band (crosswalk is reserved for routing, not as a final destination).
+  for (let k = 0; k < 12; k++) {
+    const p = this.sampleWalkableInRing(center, 6, radius);
+    if (!this.isInCrosswalkWorld(p.x, p.z)) return p;
   }
+  return this.sampleWalkableInRing(center, 6, radius);
+}
+
+private isInCrosswalkWorld(x: number, z: number) {
+  const s = WorldConfig.CHUNK_SIZE;
+  const cx = Math.round(x / s);
+  const cz = Math.round(z / s);
+  const lx = x - cx * s;
+  const lz = z - cz * s;
+  return this.isInCrosswalkLocal(lx, lz);
+}
+
+private classifySideWorld(x: number, z: number): "N" | "S" | "E" | "W" {
+  const s = WorldConfig.CHUNK_SIZE;
+  const cx = Math.round(x / s);
+  const cz = Math.round(z / s);
+  const lx = x - cx * s;
+  const lz = z - cz * s;
+
+  const halfRoad = this.ROAD_W * 0.5;
+  if (lz > halfRoad) return "N";
+  if (lz < -halfRoad) return "S";
+  if (lx > halfRoad) return "E";
+  return "W";
+}
+
+private planWalkChain(npc: SimNPC, around: Vector3, radius: number) {
+  // 목적지는 (인도)에서만 샘플링. 도로/교차로 중앙을 직접 목표로 삼지 않음.
+  const dest = this.sampleSidewalkDest(around, radius);
+
+  const halfRoad = this.ROAD_W * 0.5;
+  const pad = 0.35;
+
+  const from = npc.root.position;
+  const sideA = this.classifySideWorld(from.x, from.z);
+  const sideB = this.classifySideWorld(dest.x, dest.z);
+
+  const way: Vector3[] = [];
+
+  if (sideA === sideB) {
+    way.push(dest);
+  } else {
+    const adjacent =
+      (sideA === "N" && (sideB === "E" || sideB === "W")) ||
+      (sideA === "S" && (sideB === "E" || sideB === "W")) ||
+      (sideA === "E" && (sideB === "N" || sideB === "S")) ||
+      (sideA === "W" && (sideB === "N" || sideB === "S"));
+
+    if (adjacent) {
+      // Move around the corner on sidewalks (no need to step onto crosswalk)
+      const sx = sideB === "E" ? +1 : sideB === "W" ? -1 : sideA === "E" ? +1 : -1;
+      const sz = sideB === "N" ? +1 : sideB === "S" ? -1 : sideA === "N" ? +1 : -1;
+      const corner = new Vector3(sx * (halfRoad + pad), 0, sz * (halfRoad + pad));
+      const cwp = this.projectToWalkable(corner.x, corner.z);
+      way.push(new Vector3(cwp.x, 0, cwp.z));
+      way.push(dest);
+    } else {
+      // Opposite sides: 반드시 횡단보도로만 건넘 (인도 → 횡단보도 → 인도)
+      if ((sideA === "N" && sideB === "S") || (sideA === "S" && sideB === "N")) {
+        const off = this.CROSSWALK_OFFSET;
+        const cwX = Math.abs(from.x - off) < Math.abs(from.x + off) ? off : -off;
+
+        const entryZ = sideA === "N" ? (halfRoad + pad) : (-halfRoad - pad);
+        const exitZ  = sideB === "N" ? (halfRoad + pad) : (-halfRoad - pad);
+
+        way.push(new Vector3(cwX, 0, entryZ));
+        way.push(new Vector3(cwX, 0, 0));
+        way.push(new Vector3(cwX, 0, exitZ));
+        way.push(dest);
+      } else if ((sideA === "E" && sideB === "W") || (sideA === "W" && sideB === "E")) {
+        const off = this.CROSSWALK_OFFSET;
+        const cwZ = Math.abs(from.z - off) < Math.abs(from.z + off) ? off : -off;
+
+        const entryX = sideA === "E" ? (halfRoad + pad) : (-halfRoad - pad);
+        const exitX  = sideB === "E" ? (halfRoad + pad) : (-halfRoad - pad);
+
+        way.push(new Vector3(entryX, 0, cwZ));
+        way.push(new Vector3(0, 0, cwZ));
+        way.push(new Vector3(exitX, 0, cwZ));
+        way.push(dest);
+      } else {
+        way.push(dest);
+      }
+    }
+  }
+
+  // Safety: project all waypoints to allowed walkables (sidewalk/crosswalk)
+  for (let i = 0; i < way.length; i++) {
+    const p = this.projectToWalkable(way[i].x, way[i].z);
+    way[i].x = p.x;
+    way[i].z = p.z;
+    way[i].y = 0;
+  }
+
+  npc.waypoints = way;
+  npc.wpIndex = 0;
+  npc.target.copyFrom(way[npc.wpIndex++]);
+}
 
   private randomPointInRing(center: Vector3, minR: number, maxR: number) {
     const a = this.rand() * Math.PI * 2;

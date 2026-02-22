@@ -33,7 +33,7 @@ export class CameraController {
   private minRadius = 2.2;
   private collisionMargin = 0.45;
 
-  constructor(scene: Scene, target: TransformNode, canvas: HTMLCanvasElement) {
+	constructor(scene: Scene, target: TransformNode) {
     this.target = target;
 
     // Pivot sits slightly above the player (eye/shoulder height).

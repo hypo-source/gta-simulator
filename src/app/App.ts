@@ -18,14 +18,12 @@ export class App {
   private fpsFrames = 0;
   private fpsLastSampleMs = 0;
   private npc!: NPCManager;
-  private canvas: HTMLCanvasElement;
 
   // Auto quality state
   private qLowMs = 0;
   private qHighMs = 0;
 
   constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas;
     this.host = new EngineHost(canvas);
   }
 
@@ -34,7 +32,7 @@ export class App {
 
     this.world = new ChunkWorld(scene);
     this.player = new Player(scene);
-    this.camera = new CameraController(scene, this.player.root, this.host.canvas);
+		this.camera = new CameraController(scene, this.player.root);
     this.controls = new TouchControls(this.host.canvas);
     this.npc = new NPCManager(scene);
 

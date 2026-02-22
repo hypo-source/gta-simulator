@@ -92,7 +92,6 @@ function createBuilding(
   const cols = Math.max(2, Math.floor(w / 1.6));
   const rows = floors;
 
-  let idx = 0;
   const yStart = 1.6;
   for (let r = 0; r < rows; r++) {
     const y = yStart + r * 2.2;
@@ -111,7 +110,7 @@ function createBuilding(
       windows.push(Matrix.Translation(root.position.x + localB.x, localB.y, root.position.z + localB.z));
     }
 
-    // Side windows
+	    // Side windows
     const sideCols = Math.max(2, Math.floor(d / 1.6));
     for (let sIdx = 0; sIdx < sideCols; sIdx++) {
       const zOff = -d / 2 + 1.0 + sIdx * 1.5;
@@ -228,88 +227,146 @@ class Chunk {
 
     // Intersection clear area (no lane lines here)
     const intersectionHalf = roadW * 0.5 + 1.0;
-    const segLen = Math.max(2, (s * 0.5) - intersectionHalf);
+	// Crosswalk placement (also used to *cut* lane lines so markings don't draw under crosswalks)
+const cwDepth = 3.2;            // thickness along the walking direction
+const cwFromIntersection = 0.9; // distance from intersection clear box
+const cwCenter = intersectionHalf + (cwDepth * 0.5) + cwFromIntersection;
+const cwGap = cwDepth * 0.5 + 0.25; // extra margin to remove lines under the crosswalk
 
-    const makeXLineSeg = (name: string, z: number, mat: StandardMaterial) => {
-      // Two segments along X, leaving a gap around the intersection
-      const seg = MeshBuilder.CreateBox(name, { width: segLen, depth: lineW, height: markH }, scene);
-      seg.parent = this.root;
-      seg.position = new Vector3(-(intersectionHalf + segLen * 0.5), 0.05 + markH * 0.5, z);
-      seg.material = mat;
 
-      const seg2 = seg.clone(name + "_b") as Mesh;
-      seg2.parent = this.root;
-      seg2.position.x = (intersectionHalf + segLen * 0.5);
-      return [seg, seg2];
-    };
 
-    const makeZLineSeg = (name: string, x: number, mat: StandardMaterial) => {
-      // Two segments along Z, leaving a gap around the intersection
-      const seg = MeshBuilder.CreateBox(name, { width: lineW, depth: segLen, height: markH }, scene);
-      seg.parent = this.root;
-      seg.position = new Vector3(x, 0.05 + markH * 0.5, -(intersectionHalf + segLen * 0.5));
-      seg.material = mat;
+    
+const makeXLine = (name: string, z: number, mat: StandardMaterial) => {
+  // Draw line along X in multiple segments, leaving gaps for:
+  // - intersection clear box
+  // - crosswalk areas at x = ±cwCenter
+  const gaps: Array<[number, number]> = [
+    [-intersectionHalf, intersectionHalf],
+    [cwCenter - cwGap, cwCenter + cwGap],
+    [-cwCenter - cwGap, -cwCenter + cwGap],
+  ];
 
-      const seg2 = seg.clone(name + "_b") as Mesh;
-      seg2.parent = this.root;
-      seg2.position.z = (intersectionHalf + segLen * 0.5);
-      return [seg, seg2];
-    };
+  const ranges: Array<[number, number]> = [[-s * 0.5, s * 0.5]];
+  const cut = (range: [number, number], gap: [number, number]) => {
+    const [a, b] = range;
+    const [g0, g1] = gap;
+    if (g1 <= a || g0 >= b) return [range];
+    const out: Array<[number, number]> = [];
+    if (g0 > a) out.push([a, Math.min(g0, b)]);
+    if (g1 < b) out.push([Math.max(g1, a), b]);
+    return out;
+  };
+
+  let segs = ranges;
+  for (const g of gaps) {
+    const next: Array<[number, number]> = [];
+    for (const r of segs) next.push(...cut(r, g));
+    segs = next;
+  }
+
+  let idx = 0;
+  for (const [a, b] of segs) {
+    const len = b - a;
+    if (len <= 0.2) continue;
+    const seg = MeshBuilder.CreateBox(`${name}_${idx++}`, { width: len, depth: lineW, height: markH }, scene);
+    seg.parent = this.root;
+    seg.position = new Vector3((a + b) * 0.5, 0.05 + markH * 0.5, z);
+    seg.material = mat;
+  }
+};
+
+const makeZLine = (name: string, x: number, mat: StandardMaterial) => {
+  // Draw line along Z in multiple segments, leaving gaps for:
+  // - intersection clear box
+  // - crosswalk areas at z = ±cwCenter
+  const gaps: Array<[number, number]> = [
+    [-intersectionHalf, intersectionHalf],
+    [cwCenter - cwGap, cwCenter + cwGap],
+    [-cwCenter - cwGap, -cwCenter + cwGap],
+  ];
+
+  const ranges: Array<[number, number]> = [[-s * 0.5, s * 0.5]];
+  const cut = (range: [number, number], gap: [number, number]) => {
+    const [a, b] = range;
+    const [g0, g1] = gap;
+    if (g1 <= a || g0 >= b) return [range];
+    const out: Array<[number, number]> = [];
+    if (g0 > a) out.push([a, Math.min(g0, b)]);
+    if (g1 < b) out.push([Math.max(g1, a), b]);
+    return out;
+  };
+
+  let segs = ranges;
+  for (const g of gaps) {
+    const next: Array<[number, number]> = [];
+    for (const r of segs) next.push(...cut(r, g));
+    segs = next;
+  }
+
+  let idx = 0;
+  for (const [a, b] of segs) {
+    const len = b - a;
+    if (len <= 0.2) continue;
+    const seg = MeshBuilder.CreateBox(`${name}_${idx++}`, { width: lineW, depth: len, height: markH }, scene);
+    seg.parent = this.root;
+    seg.position = new Vector3(x, 0.05 + markH * 0.5, (a + b) * 0.5);
+    seg.material = mat;
+  }
+};
+
+	// Zebra crosswalk helpers.
+	// makeCrosswalkZ: crosswalk centered at (xCenter, zCenter), pedestrians cross along Z.
+	// Stripes extend along Z and repeat across X.
+	const makeCrosswalkZ = (xCenter: number, zCenter: number) => {
+	  const stripeW = 0.55;
+	  const gap = 0.35;
+	  const span = roadW + 0.8; // across the road only
+	  const count = Math.floor(span / (stripeW + gap));
+	  const start = -span * 0.5 + stripeW * 0.5;
+	  for (let i = 0; i < count; i++) {
+	    const x = start + i * (stripeW + gap);
+	    const stripe = MeshBuilder.CreateBox(`cwZ_${i}`, { width: stripeW, depth: cwDepth, height: markH }, scene);
+	    stripe.parent = this.root;
+	    stripe.position = new Vector3(xCenter + x, 0.05 + markH * 0.5, zCenter);
+	    stripe.material = markWhite;
+	  }
+	};
+
+	// makeCrosswalkX: crosswalk centered at (xCenter, zCenter), pedestrians cross along X.
+	// Stripes extend along X and repeat across Z.
+	const makeCrosswalkX = (xCenter: number, zCenter: number) => {
+	  const stripeW = 0.55;
+	  const gap = 0.35;
+	  const span = roadW + 0.8; // across the road only
+	  const count = Math.floor(span / (stripeW + gap));
+	  const start = -span * 0.5 + stripeW * 0.5;
+	  for (let i = 0; i < count; i++) {
+	    const z = start + i * (stripeW + gap);
+	    const stripe = MeshBuilder.CreateBox(`cwX_${i}`, { width: cwDepth, depth: stripeW, height: markH }, scene);
+	    stripe.parent = this.root;
+	    stripe.position = new Vector3(xCenter, 0.05 + markH * 0.5, zCenter + z);
+	    stripe.material = markWhite;
+	  }
+	};
 
     // Center lines (yellow)
-    makeXLineSeg("centerLineX", 0, markYellow);
-    makeZLineSeg("centerLineZ", 0, markYellow);
+    makeXLine("centerLineX", 0, markYellow);
+    makeZLine("centerLineZ", 0, markYellow);
 
     // Lane separators (white) for 4 lanes total (2 each direction)
     const laneOff = roadW * 0.25; // between lanes per direction
     const edgeOff = roadW * 0.5 - 0.35; // road edge highlight
 
-    makeXLineSeg("laneX1", laneOff, markWhite);
-    makeXLineSeg("laneX2", -laneOff, markWhite);
-    makeXLineSeg("edgeX1", edgeOff, markWhite);
-    makeXLineSeg("edgeX2", -edgeOff, markWhite);
+    makeXLine("laneX1", laneOff, markWhite);
+    makeXLine("laneX2", -laneOff, markWhite);
+    makeXLine("edgeX1", edgeOff, markWhite);
+    makeXLine("edgeX2", -edgeOff, markWhite);
 
-    makeZLineSeg("laneZ1", laneOff, markWhite);
-    makeZLineSeg("laneZ2", -laneOff, markWhite);
-    makeZLineSeg("edgeZ1", edgeOff, markWhite);
-    makeZLineSeg("edgeZ2", -edgeOff, markWhite);
-
+    makeZLine("laneZ1", laneOff, markWhite);
+    makeZLine("laneZ2", -laneOff, markWhite);
+    makeZLine("edgeZ1", edgeOff, markWhite);
+    makeZLine("edgeZ2", -edgeOff, markWhite);
     // Crosswalks (zebra) near the intersection (4 sides)
-    // Place them just outside the clear intersection box, like real junctions.
-    const cwDepth = 3.2;           // thickness along the walking direction
-    const cwLength = roadW + 0.6;  // across the road
-    const stripeW = 0.45;
-    const stripeGap = 0.30;
-    const stripeCount = Math.max(7, Math.floor(cwLength / (stripeW + stripeGap)));
-
-    const makeCrosswalkX = (centerX: number, centerZ: number) => {
-      // Pedestrians cross along X (across the vertical road). Stripes extend along Z.
-      for (let k = 0; k < stripeCount; k++) {
-        const t = (k - (stripeCount - 1) * 0.5) * (stripeW + stripeGap);
-        const stripe = MeshBuilder.CreateBox("cwStripeX", { width: cwDepth, depth: stripeW, height: markH }, scene);
-        stripe.parent = this.root;
-        stripe.position.y = 0.05 + markH * 0.5;
-        stripe.position.x = centerX;
-        stripe.position.z = centerZ + t;
-        stripe.material = markWhite;
-      }
-    };
-
-    const makeCrosswalkZ = (centerX: number, centerZ: number) => {
-      // Pedestrians cross along Z (across the horizontal road). Stripes extend along X.
-      for (let k = 0; k < stripeCount; k++) {
-        const t = (k - (stripeCount - 1) * 0.5) * (stripeW + stripeGap);
-        const stripe = MeshBuilder.CreateBox("cwStripeZ", { width: stripeW, depth: cwDepth, height: markH }, scene);
-        stripe.parent = this.root;
-        stripe.position.y = 0.05 + markH * 0.5;
-        stripe.position.x = centerX + t;
-        stripe.position.z = centerZ;
-        stripe.material = markWhite;
-      }
-    };
-
-    const cwFromIntersection = 0.9;
-    const cwCenter = intersectionHalf + (cwDepth * 0.5) + cwFromIntersection;
 
     // North/South crosswalks across the X-road (pedestrians cross Z)
     makeCrosswalkZ(0, cwCenter);
@@ -358,8 +415,7 @@ class Chunk {
     makeSignal(corner, -corner, "EW");
     makeSignal(-corner, -corner, "NS");
 // Buildings: place ONLY on buildable land (green lots), never on sidewalks/roads
-    const block = s / 2;
-    const margin = 10;
+	    const block = s / 2;
 
     // Buildable lots (1 per quadrant)
     const lotMat = getOrCreateMat(scene, "mat_lot", new Color3(0.18, 0.28, 0.16));
