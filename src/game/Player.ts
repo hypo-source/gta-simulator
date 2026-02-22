@@ -42,6 +42,8 @@ export class Player {
   constructor(scene: Scene) {
     this.root = new TransformNode("playerRoot", scene);
 
+    this.root.scaling = new Vector3(0.75, 0.75, 0.75);
+
     // --- Materials
     const matSkin = new StandardMaterial("matSkin", scene);
     matSkin.diffuseColor = new Color3(0.98, 0.86, 0.72);

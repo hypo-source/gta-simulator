@@ -213,119 +213,151 @@ class Chunk {
 
 
 
+    
     // --- Road markings / crosswalk / traffic lights (cheap city feel) ---
+    // NOTE: Intersection area usually has no lane lines. We draw segmented lines and leave a clean center box.
     const markWhite = getOrCreateMat(scene, "mat_road_mark_white", new Color3(0.92, 0.92, 0.92), new Color3(0.55, 0.55, 0.55));
     const markYellow = getOrCreateMat(scene, "mat_road_mark_yellow", new Color3(0.92, 0.82, 0.20), new Color3(0.55, 0.48, 0.10));
     const poleMat = getOrCreateMat(scene, "mat_signal_pole", new Color3(0.10, 0.10, 0.10));
-    const lightRed = getOrCreateMat(scene, "mat_signal_red", new Color3(0.15, 0.02, 0.02), new Color3(0.95, 0.10, 0.10));
-    const lightGreen = getOrCreateMat(scene, "mat_signal_green", new Color3(0.02, 0.15, 0.02), new Color3(0.12, 0.95, 0.18));
+    const lightRedMat = getOrCreateMat(scene, "mat_signal_red", new Color3(0.15, 0.02, 0.02), new Color3(0.95, 0.10, 0.10));
+    const lightGreenMat = getOrCreateMat(scene, "mat_signal_green", new Color3(0.02, 0.15, 0.02), new Color3(0.12, 0.95, 0.18));
+    const lightYellowMat = getOrCreateMat(scene, "mat_signal_yellow", new Color3(0.15, 0.12, 0.02), new Color3(0.95, 0.82, 0.12));
 
     const markH = 0.012;
     const lineW = 0.22;
 
-    // Center lines (yellow)
-    const cLineX = MeshBuilder.CreateBox("centerLineX", { width: s, depth: lineW, height: markH }, scene);
-    cLineX.parent = this.root;
-    cLineX.position = new Vector3(0, 0.05 + markH * 0.5, 0);
-    cLineX.material = markYellow;
+    // Intersection clear area (no lane lines here)
+    const intersectionHalf = roadW * 0.5 + 1.0;
+    const segLen = Math.max(2, (s * 0.5) - intersectionHalf);
 
-    const cLineZ = MeshBuilder.CreateBox("centerLineZ", { width: lineW, depth: s, height: markH }, scene);
-    cLineZ.parent = this.root;
-    cLineZ.position = new Vector3(0, 0.05 + markH * 0.5, 0);
-    cLineZ.material = markYellow;
+    const makeXLineSeg = (name: string, z: number, mat: StandardMaterial) => {
+      // Two segments along X, leaving a gap around the intersection
+      const seg = MeshBuilder.CreateBox(name, { width: segLen, depth: lineW, height: markH }, scene);
+      seg.parent = this.root;
+      seg.position = new Vector3(-(intersectionHalf + segLen * 0.5), 0.05 + markH * 0.5, z);
+      seg.material = mat;
+
+      const seg2 = seg.clone(name + "_b") as Mesh;
+      seg2.parent = this.root;
+      seg2.position.x = (intersectionHalf + segLen * 0.5);
+      return [seg, seg2];
+    };
+
+    const makeZLineSeg = (name: string, x: number, mat: StandardMaterial) => {
+      // Two segments along Z, leaving a gap around the intersection
+      const seg = MeshBuilder.CreateBox(name, { width: lineW, depth: segLen, height: markH }, scene);
+      seg.parent = this.root;
+      seg.position = new Vector3(x, 0.05 + markH * 0.5, -(intersectionHalf + segLen * 0.5));
+      seg.material = mat;
+
+      const seg2 = seg.clone(name + "_b") as Mesh;
+      seg2.parent = this.root;
+      seg2.position.z = (intersectionHalf + segLen * 0.5);
+      return [seg, seg2];
+    };
+
+    // Center lines (yellow)
+    makeXLineSeg("centerLineX", 0, markYellow);
+    makeZLineSeg("centerLineZ", 0, markYellow);
 
     // Lane separators (white) for 4 lanes total (2 each direction)
     const laneOff = roadW * 0.25; // between lanes per direction
     const edgeOff = roadW * 0.5 - 0.35; // road edge highlight
 
-    const laneX1 = MeshBuilder.CreateBox("laneX1", { width: s, depth: lineW, height: markH }, scene);
-    laneX1.parent = this.root;
-    laneX1.position = new Vector3(0, 0.05 + markH * 0.5, laneOff);
-    laneX1.material = markWhite;
+    makeXLineSeg("laneX1", laneOff, markWhite);
+    makeXLineSeg("laneX2", -laneOff, markWhite);
+    makeXLineSeg("edgeX1", edgeOff, markWhite);
+    makeXLineSeg("edgeX2", -edgeOff, markWhite);
 
-    const laneX2 = laneX1.clone("laneX2") as Mesh;
-    laneX2.parent = this.root;
-    laneX2.position.z = -laneOff;
+    makeZLineSeg("laneZ1", laneOff, markWhite);
+    makeZLineSeg("laneZ2", -laneOff, markWhite);
+    makeZLineSeg("edgeZ1", edgeOff, markWhite);
+    makeZLineSeg("edgeZ2", -edgeOff, markWhite);
 
-    const edgeX1 = laneX1.clone("edgeX1") as Mesh;
-    edgeX1.parent = this.root;
-    edgeX1.position.z = edgeOff;
+    // Crosswalks (zebra) near the intersection (4 sides)
+    // Place them just outside the clear intersection box, like real junctions.
+    const cwDepth = 3.2;           // thickness along the walking direction
+    const cwLength = roadW + 0.6;  // across the road
+    const stripeW = 0.45;
+    const stripeGap = 0.30;
+    const stripeCount = Math.max(7, Math.floor(cwLength / (stripeW + stripeGap)));
 
-    const edgeX2 = laneX1.clone("edgeX2") as Mesh;
-    edgeX2.parent = this.root;
-    edgeX2.position.z = -edgeOff;
-
-    const laneZ1 = MeshBuilder.CreateBox("laneZ1", { width: lineW, depth: s, height: markH }, scene);
-    laneZ1.parent = this.root;
-    laneZ1.position = new Vector3(laneOff, 0.05 + markH * 0.5, 0);
-    laneZ1.material = markWhite;
-
-    const laneZ2 = laneZ1.clone("laneZ2") as Mesh;
-    laneZ2.parent = this.root;
-    laneZ2.position.x = -laneOff;
-
-    const edgeZ1 = laneZ1.clone("edgeZ1") as Mesh;
-    edgeZ1.parent = this.root;
-    edgeZ1.position.x = edgeOff;
-
-    const edgeZ2 = laneZ1.clone("edgeZ2") as Mesh;
-    edgeZ2.parent = this.root;
-    edgeZ2.position.x = -edgeOff;
-
-    // Crosswalks (zebra) near intersection (4 sides)
-    const cwOffset = 8;
-    const cwWidth = 6;
-    const cwStripeW = 0.55;
-    const cwStripeGap = 0.35;
-    const stripes = 9;
-
-    const makeCrosswalk = (centerX: number, centerZ: number, alongX: boolean) => {
-      // alongX=true => stripes extend in X (pedestrians cross Z)
-      for (let k = 0; k < stripes; k++) {
-        const t = (k - (stripes - 1) * 0.5) * (cwStripeW + cwStripeGap);
-        const w = alongX ? cwWidth : cwStripeW;
-        const d = alongX ? cwStripeW : cwWidth;
-        const stripe = MeshBuilder.CreateBox("cwStripe", { width: w, depth: d, height: markH }, scene);
+    const makeCrosswalkX = (centerX: number, centerZ: number) => {
+      // Pedestrians cross along X (across the vertical road). Stripes extend along Z.
+      for (let k = 0; k < stripeCount; k++) {
+        const t = (k - (stripeCount - 1) * 0.5) * (stripeW + stripeGap);
+        const stripe = MeshBuilder.CreateBox("cwStripeX", { width: cwDepth, depth: stripeW, height: markH }, scene);
         stripe.parent = this.root;
         stripe.position.y = 0.05 + markH * 0.5;
-        stripe.position.x = centerX + (alongX ? t : 0);
-        stripe.position.z = centerZ + (alongX ? 0 : t);
+        stripe.position.x = centerX;
+        stripe.position.z = centerZ + t;
         stripe.material = markWhite;
       }
     };
 
-    // Pedestrians cross the horizontal road (roadX) at x=±cwOffset (cross Z)
-    makeCrosswalk(cwOffset, 0, true);
-    makeCrosswalk(-cwOffset, 0, true);
-    // Pedestrians cross the vertical road (roadZ) at z=±cwOffset (cross X)
-    makeCrosswalk(0, cwOffset, false);
-    makeCrosswalk(0, -cwOffset, false);
+    const makeCrosswalkZ = (centerX: number, centerZ: number) => {
+      // Pedestrians cross along Z (across the horizontal road). Stripes extend along X.
+      for (let k = 0; k < stripeCount; k++) {
+        const t = (k - (stripeCount - 1) * 0.5) * (stripeW + stripeGap);
+        const stripe = MeshBuilder.CreateBox("cwStripeZ", { width: stripeW, depth: cwDepth, height: markH }, scene);
+        stripe.parent = this.root;
+        stripe.position.y = 0.05 + markH * 0.5;
+        stripe.position.x = centerX + t;
+        stripe.position.z = centerZ;
+        stripe.material = markWhite;
+      }
+    };
 
-    // Simple traffic lights at 4 corners (static red/green for vibe)
-    const makeSignal = (x: number, z: number, green: boolean) => {
+    const cwFromIntersection = 0.9;
+    const cwCenter = intersectionHalf + (cwDepth * 0.5) + cwFromIntersection;
+
+    // North/South crosswalks across the X-road (pedestrians cross Z)
+    makeCrosswalkZ(0, cwCenter);
+    makeCrosswalkZ(0, -cwCenter);
+
+    // East/West crosswalks across the Z-road (pedestrians cross X)
+    makeCrosswalkX(cwCenter, 0);
+    makeCrosswalkX(-cwCenter, 0);
+
+    // Traffic lights (animated, real-like phasing: NS green -> yellow -> all-red -> EW green -> yellow -> all-red)
+    type SignalPhase = "NS" | "EW";
+    const makeSignal = (x: number, z: number, phase: SignalPhase) => {
       const pole = MeshBuilder.CreateBox("sigPole", { width: 0.22, depth: 0.22, height: 4.2 }, scene);
       pole.parent = this.root;
       pole.position = new Vector3(x, 2.1, z);
       pole.material = poleMat;
 
-      const head = MeshBuilder.CreateBox("sigHead", { width: 0.42, depth: 0.28, height: 0.85 }, scene);
+      const head = MeshBuilder.CreateBox("sigHead", { width: 0.48, depth: 0.28, height: 0.95 }, scene);
       head.parent = this.root;
-      head.position = new Vector3(x, 3.55, z);
+      head.position = new Vector3(x, 3.60, z);
       head.material = poleMat;
 
-      const lamp = MeshBuilder.CreateBox("sigLamp", { width: 0.22, depth: 0.05, height: 0.22 }, scene);
-      lamp.parent = this.root;
-      lamp.position = new Vector3(x, 3.55, z + 0.17);
-      lamp.material = green ? lightGreen : lightRed;
+      const lampR = MeshBuilder.CreateBox("sigLampR", { width: 0.22, depth: 0.06, height: 0.22 }, scene);
+      lampR.parent = this.root;
+      lampR.position = new Vector3(x, 3.72, z + 0.17);
+      lampR.material = lightRedMat;
+
+      const lampY = MeshBuilder.CreateBox("sigLampY", { width: 0.22, depth: 0.06, height: 0.22 }, scene);
+      lampY.parent = this.root;
+      lampY.position = new Vector3(x, 3.60, z + 0.17);
+      lampY.material = lightYellowMat;
+
+      const lampG = MeshBuilder.CreateBox("sigLampG", { width: 0.22, depth: 0.06, height: 0.22 }, scene);
+      lampG.parent = this.root;
+      lampG.position = new Vector3(x, 3.48, z + 0.17);
+      lampG.material = lightGreenMat;
+
+      // Register to the global controller so every chunk's lights stay in sync.
+      ChunkWorld.registerSignal({ phase, red: lampR, yellow: lampY, green: lampG });
     };
 
-    const corner = roadW * 0.5 + 1.3;
-    makeSignal(corner, corner, false);
-    makeSignal(-corner, corner, true);
-    makeSignal(corner, -corner, true);
-    makeSignal(-corner, -corner, false);
-
-    // Buildings: place ONLY on buildable land (green lots), never on sidewalks/roads
+    const corner = roadW * 0.5 + sidewalkW + 0.9;
+    // Place them at 4 corners; which direction they control is simplified by corner quadrant.
+    makeSignal(corner, corner, "NS");
+    makeSignal(-corner, corner, "EW");
+    makeSignal(corner, -corner, "EW");
+    makeSignal(-corner, -corner, "NS");
+// Buildings: place ONLY on buildable land (green lots), never on sidewalks/roads
     const block = s / 2;
     const margin = 10;
 
@@ -448,6 +480,64 @@ class Chunk {
 }
 
 export class ChunkWorld {
+  // --- Global traffic signal controller (keeps all chunks in sync) ---
+  private static _signals: Array<{ phase: "NS" | "EW"; red: Mesh; yellow: Mesh; green: Mesh }> = [];
+  private static _sigT = 0;
+
+  static registerSignal(s: { phase: "NS" | "EW"; red: Mesh; yellow: Mesh; green: Mesh }) {
+    this._signals.push(s);
+    // start in a sane state
+    s.red.setEnabled(true);
+    s.yellow.setEnabled(false);
+    s.green.setEnabled(false);
+  }
+
+  private static _setLamp(s: { red: Mesh; yellow: Mesh; green: Mesh }, r: boolean, y: boolean, g: boolean) {
+    s.red.setEnabled(r);
+    s.yellow.setEnabled(y);
+    s.green.setEnabled(g);
+  }
+
+  private static updateSignals(dt: number) {
+    // Phase timings (seconds)
+    const NS_GREEN = 10;
+    const NS_YELLOW = 2;
+    const ALL_RED_1 = 1;
+    const EW_GREEN = 10;
+    const EW_YELLOW = 2;
+    const ALL_RED_2 = 1;
+
+    const cycle = NS_GREEN + NS_YELLOW + ALL_RED_1 + EW_GREEN + EW_YELLOW + ALL_RED_2;
+    this._sigT = (this._sigT + dt) % cycle;
+
+    const t = this._sigT;
+    const inNSGreen = t < NS_GREEN;
+    const inNSYellow = t >= NS_GREEN && t < NS_GREEN + NS_YELLOW;
+    const inAllRed1 = t >= NS_GREEN + NS_YELLOW && t < NS_GREEN + NS_YELLOW + ALL_RED_1;
+    const inEWGreen = t >= NS_GREEN + NS_YELLOW + ALL_RED_1 && t < NS_GREEN + NS_YELLOW + ALL_RED_1 + EW_GREEN;
+    const inEWYellow = t >= NS_GREEN + NS_YELLOW + ALL_RED_1 + EW_GREEN && t < NS_GREEN + NS_YELLOW + ALL_RED_1 + EW_GREEN + EW_YELLOW;
+    // else -> all red 2
+
+    for (const s of this._signals) {
+      const isNS = s.phase === "NS";
+      if (inAllRed1 || (!inNSGreen && !inNSYellow && !inEWGreen && !inEWYellow)) {
+        // all red
+        this._setLamp(s, true, false, false);
+      } else if (inNSGreen) {
+        this._setLamp(s, !isNS, false, isNS);
+      } else if (inNSYellow) {
+        this._setLamp(s, !isNS, isNS, false);
+      } else if (inEWGreen) {
+        this._setLamp(s, isNS, false, !isNS);
+      } else if (inEWYellow) {
+        this._setLamp(s, isNS, !isNS, false);
+      } else {
+        this._setLamp(s, true, false, false);
+      }
+    }
+  }
+
+
   private loaded = new Map<ChunkKey, Chunk>();
   private scene: Scene;
 
@@ -456,6 +546,10 @@ export class ChunkWorld {
   }
 
   update(playerPos: Vector3) {
+    // drive traffic light animation
+    const dt = this.scene.getEngine().getDeltaTime() * 0.001;
+    ChunkWorld.updateSignals(dt);
+
     const cx = Math.floor(playerPos.x / WorldConfig.CHUNK_SIZE);
     const cz = Math.floor(playerPos.z / WorldConfig.CHUNK_SIZE);
 

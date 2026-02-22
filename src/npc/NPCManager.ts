@@ -81,8 +81,8 @@ export class NPCManager {
   private readonly ROAD_W = 12; // must match ChunkWorld roadW
   private readonly SIDEWALK_W = 4.0; // must match ChunkWorld sidewalkW
   private readonly ROAD_THRESHOLD = 10.5; // roadW/2 + sidewalkW + small margin
-  private readonly CROSSWALK_OFFSET = 8; // must match ChunkWorld cwOffset
-  private readonly CROSSWALK_WIDTH = 6; // must match ChunkWorld cwWidth
+  private readonly CROSSWALK_OFFSET = 9.5; // must match ChunkWorld crosswalk center (intersectionHalf + cwDepth/2 + offset)
+  private readonly CROSSWALK_WIDTH = 3.2; // must match ChunkWorld cwDepth (thickness)
   private readonly CROSSWALK_DEPTH = 12; // equals ROAD_W, pedestrian crossing span
   private readonly CROWD_FADE_IN_SPEED = 3.5;
 
@@ -150,6 +150,7 @@ export class NPCManager {
 
   private spawnSimNPC(around: Vector3): SimNPC {
     const root = new TransformNode("simNPC", this.scene);
+    root.scaling = new Vector3(0.8, 0.8, 0.8);
 
     const torso = MeshBuilder.CreateBox(
       "simTorso",
