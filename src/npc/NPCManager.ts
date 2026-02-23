@@ -124,7 +124,9 @@ export class NPCManager {
   update(
     dt: number,
     playerPos: Vector3,
-    resolveCollision?: (pos: Vector3, radius: number) => void
+    resolveCollision?: (pos: Vector3, radius: number) => void,
+    vehiclePos?: Vector3,
+    vehicleRadius: number = 1.35
   ) {
     // compute player planar speed for adaptive handoff budget
     if (Number.isNaN(this.lastPlayerPos.x)) this.lastPlayerPos.copyFrom(playerPos);
@@ -139,7 +141,7 @@ export class NPCManager {
 
     this.tryHandoffCrowdToSim(dt, playerPos);
 
-    this.updateSim(dt, playerPos, resolveCollision);
+    this.updateSim(dt, playerPos, resolveCollision, vehiclePos, vehicleRadius);
     this.updateThin(dt, this.crowd, "crowd", playerPos);
     this.updateThin(dt, this.fake, "fake", playerPos);
   }
@@ -250,7 +252,9 @@ export class NPCManager {
   private updateSim(
     dt: number,
     playerPos: Vector3,
-    resolveCollision?: (pos: Vector3, radius: number) => void
+    resolveCollision?: (pos: Vector3, radius: number) => void,
+    vehiclePos?: Vector3,
+    vehicleRadius: number = 1.35
   ) {
     for (const npc of this.sim) {
       // Keep sim around player
@@ -342,6 +346,30 @@ export class NPCManager {
             npc.root.position.x += (dxp / d) * push;
             npc.root.position.z += (dzp / d) * push;
           }
+
+        // Avoid the vehicle (bigger radius, slightly stronger push).
+        if (vehiclePos) {
+          const dxv = npc.root.position.x - vehiclePos.x;
+          const dzv = npc.root.position.z - vehiclePos.z;
+          const d2v = dxv * dxv + dzv * dzv;
+
+          // Vehicle is treated as a fat circle for cheap avoidance/collision.
+          // NPC radius ~0.48; add a small buffer so they don't graze the body.
+          const minR = vehicleRadius + 0.48 + 0.25;
+          if (d2v > 1e-6 && d2v < minR * minR) {
+            const d = Math.sqrt(d2v);
+            // Stronger push when very close, milder near boundary.
+            const t = 1 - d / minR; // 0..1
+            const push = (minR - d) * (1.0 + t * 0.9);
+
+            npc.root.position.x += (dxv / d) * push;
+            npc.root.position.z += (dzv / d) * push;
+
+            // Nudge yaw so NPC tends to step aside instead of oscillating.
+            const sign = Math.sin(npc.phase * 2.13) >= 0 ? 1 : -1;
+            npc.desiredYaw += sign * (0.35 + t * 0.35);
+          }
+        }
         }
       }
       npc.moveRampLeft = Math.max(0, npc.moveRampLeft - dt);

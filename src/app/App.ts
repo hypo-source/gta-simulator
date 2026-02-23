@@ -67,8 +67,6 @@ export class App {
       const dt = this.host.getDeltaSeconds();
       const input = this.controls.readInput();
 
-      let didWorldUpdate = false;
-
       // 탑승/하차 처리
       if (this.interactQueued) {
         this.interactQueued = false;
@@ -99,27 +97,21 @@ export class App {
 
         this.vehicle.update(dt, { throttle, steer, boost, handbrake });
 
-
-        // 차량 ↔ 건물 충돌/슬라이딩 (플레이어와 동일한 AABB 리졸버 재사용)
-        // NOTE: resolveCircleAgainstBuildings는 loaded chunk만 검사하므로,
-        // 먼저 world.update를 한번 호출해 차량 주변 청크를 로드한다.
-        this.world.update(this.vehicle.root.position);
-        didWorldUpdate = true;
-
-        const attempted = this.vehicle.root.position.clone();
-        const VEHICLE_RADIUS = 1.25;
-        this.world.resolveCircleAgainstBuildings(this.vehicle.root.position, VEHICLE_RADIUS);
-        const push = this.vehicle.root.position.subtract(attempted);
-        this.vehicle.applyCollisionPush(push, dt);
-
         // 카메라/미션/월드가 player root 기반이라 player root를 차량에 붙여준다
         this.player.root.position.copyFrom(this.vehicle.root.position);
         this.player.root.rotation.y = this.vehicle.root.rotation.y;
       } else {
         this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       }
-      if (!didWorldUpdate) this.world.update(refPos);
-      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
+
+      this.world.update(refPos);
+      this.npc.update(
+        dt,
+        refPos,
+        (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r),
+        this.vehicle?.root?.position,
+        1.35
+      );
       this.mission.update(dt, refPos);
 
       this.camera.addZoomDelta(input.zoom);
