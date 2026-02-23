@@ -305,6 +305,20 @@ export class NPCManager {
         const p = this.projectToWalkable(npc.root.position.x, npc.root.position.z);
         npc.root.position.x = p.x;
         npc.root.position.z = p.z;
+
+        // Avoid overlapping the player (cheap separation push)
+        {
+          const dxp = npc.root.position.x - playerPos.x;
+          const dzp = npc.root.position.z - playerPos.z;
+          const d2p = dxp * dxp + dzp * dzp;
+          const minR = 0.95;
+          if (d2p > 1e-6 && d2p < minR * minR) {
+            const d = Math.sqrt(d2p);
+            const push = (minR - d);
+            npc.root.position.x += (dxp / d) * push;
+            npc.root.position.z += (dzp / d) * push;
+          }
+        }
       }
       npc.moveRampLeft = Math.max(0, npc.moveRampLeft - dt);
 

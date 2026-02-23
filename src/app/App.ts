@@ -5,6 +5,7 @@ import { CameraController } from "../game/CameraController";
 import { TouchControls } from "../game/TouchControls";
 import { WorldConfig } from "../world/WorldConfig";
 import { NPCManager } from "../npc/NPCManager";
+import { MissionManager } from "../game/MissionManager";
 
 export class App {
   private host: EngineHost;
@@ -14,10 +15,14 @@ export class App {
   private controls!: TouchControls;
   private hintEl: HTMLDivElement | null = null;
   private fpsEl: HTMLDivElement | null = null;
+  private missionEl: HTMLDivElement | null = null;
+  private popupEl: HTMLDivElement | null = null;
+  private missionBtn: HTMLButtonElement | null = null;
   private fpsValue = 0;
   private fpsFrames = 0;
   private fpsLastSampleMs = 0;
   private npc!: NPCManager;
+  private mission!: MissionManager;
 
   // Auto quality state
   private qLowMs = 0;
@@ -35,9 +40,12 @@ export class App {
 		this.camera = new CameraController(scene, this.player.root);
     this.controls = new TouchControls(this.host.canvas);
     this.npc = new NPCManager(scene);
+    this.mission = new MissionManager(scene, (pos, r) => this.world.isCircleOverlappingBuildings(pos, r));
 
     this.mountControlsHint();
     this.mountFpsHud();
+    this.mountMissionHud();
+    this.mountPopupHud();
 
     this.host.bindResize(() => {
       this.camera.onResize();
@@ -47,14 +55,104 @@ export class App {
     this.host.run(() => {
       const dt = this.host.getDeltaSeconds();
       const input = this.controls.readInput();
-      this.player.update(dt, input);
+      this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       this.world.update(this.player.root.position);
-        this.npc.update(dt, this.player.root.position);
+      this.npc.update(dt, this.player.root.position);
+      this.mission.update(dt, this.player.root.position);
       this.camera.addZoomDelta(input.zoom);
       this.camera.updateWithInput(dt, input.lookY);
       this.updateFpsHud();
+      this.updateMissionHud();
+      this.updatePopupHud();
       this.autoQuality(dt);
     });
+  }
+
+  private mountMissionHud() {
+    const el = document.createElement("div");
+    el.id = "missionHud";
+
+    Object.assign(el.style, {
+      position: "fixed",
+      left: "12px",
+      bottom: "12px",
+      zIndex: "10000",
+      color: "#fff",
+      background: "rgba(0,0,0,0.45)",
+      padding: "8px 10px",
+      borderRadius: "10px",
+      fontSize: "13px",
+      fontWeight: "700",
+      lineHeight: "1.25",
+      backdropFilter: "blur(6px)",
+      userSelect: "none",
+      pointerEvents: "none",
+      letterSpacing: "0.2px",
+      maxWidth: "min(620px, calc(100vw - 24px))",
+    } as Partial<CSSStyleDeclaration>);
+
+    el.textContent = "미션: 대기 (M 시작)";
+    document.body.appendChild(el);
+    this.missionEl = el;
+
+    // Mobile/Touch-friendly start button (doesn't interfere with controls).
+    const btn = document.createElement("button");
+    btn.id = "missionBtn";
+    btn.textContent = "미션 시작";
+    Object.assign(btn.style, {
+      position: "fixed",
+      right: "12px",
+      bottom: "12px",
+      zIndex: "10001",
+      padding: "10px 12px",
+      borderRadius: "12px",
+      border: "1px solid rgba(255,255,255,0.25)",
+      background: "rgba(0,0,0,0.55)",
+      color: "#fff",
+      fontSize: "13px",
+      fontWeight: "800",
+      letterSpacing: "0.2px",
+      cursor: "pointer",
+      userSelect: "none",
+      touchAction: "manipulation",
+    } as Partial<CSSStyleDeclaration>);
+    document.body.appendChild(btn);
+    this.missionBtn = btn;
+
+    const isTouch = ("ontouchstart" in window) || navigator.maxTouchPoints > 0;
+    // On desktop, keep it subtle but available.
+    btn.style.opacity = isTouch ? "1" : "0.55";
+
+    const startMission = () => {
+      this.mission.start(this.player.root.position);
+      this.updateMissionHud();
+      this.updatePopupHud();
+      btn.textContent = "미션 재시작";
+    };
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startMission();
+    });
+
+    // Start / restart the mission with M.
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "KeyM") {
+        startMission();
+      }
+    });
+  }
+
+  private updateMissionHud() {
+    if (!this.missionEl) return;
+    this.missionEl.textContent = this.mission.getHudText(
+      this.player?.root?.position
+    );
+
+    if (this.missionBtn) {
+      if (this.mission.isIdle()) this.missionBtn.textContent = "미션 시작";
+      else this.missionBtn.textContent = "미션 재시작";
+    }
   }
 
   private mountFpsHud() {
@@ -116,6 +214,47 @@ private updateFpsHud() {
     this.fpsEl.textContent = `FPS ${shown.toFixed(0)}  |  R=${WorldConfig.FAR_RADIUS}  |  windows=${this.windowQualityLabel()}${npcText}`;
   }
 
+
+private mountPopupHud() {
+  const el = document.createElement("div");
+  el.id = "missionPopup";
+  Object.assign(el.style, {
+    position: "fixed",
+    left: "50%",
+    top: "18%",
+    transform: "translate(-50%, -50%)",
+    zIndex: "10002",
+    padding: "10px 14px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.35)",
+    color: "#fff",
+    fontSize: "18px",
+    fontWeight: "900",
+    letterSpacing: "0.4px",
+    textShadow: "0 2px 10px rgba(0,0,0,0.55)",
+    userSelect: "none",
+    pointerEvents: "none",
+    opacity: "0",
+    transition: "opacity 60ms linear",
+    whiteSpace: "nowrap",
+  } as Partial<CSSStyleDeclaration>);
+  document.body.appendChild(el);
+  this.popupEl = el;
+}
+
+private updatePopupHud() {
+  if (!this.popupEl) return;
+  const p = this.mission.getPopup();
+  if (!p) {
+    this.popupEl.style.opacity = "0";
+    return;
+  }
+  this.popupEl.textContent = p.text;
+  this.popupEl.style.color = p.color;
+  this.popupEl.style.opacity = String(p.alpha);
+  this.popupEl.style.transform = `translate(-50%, -50%) scale(${p.scale.toFixed(3)})`;
+}
+
   private autoQuality(dt: number) {
     // Keep FPS high by dynamically adjusting load radius + window density.
     // Targets ~55-60fps. Uses hysteresis to avoid oscillation.
@@ -164,6 +303,7 @@ private updateFpsHud() {
         <div>상하 시점: <b>↑/↓</b> 또는 <b>드래그 상하</b></div>
         <div>줌 인/아웃: <b>마우스 휠</b></div>
         <div>피치 반전 토글: <b>I</b> (<span id="invertPitchState"></span>)</div>
+        <div>미니 미션(배달/체크포인트) 시작/재시작: <b>M</b></div>
       </div>
       <div>
         <div><b>모바일</b> · 왼쪽 드래그: 이동 · 오른쪽 드래그: 회전</div>

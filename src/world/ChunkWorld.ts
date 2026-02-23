@@ -155,6 +155,8 @@ type BuildingLOD = {
   detail: TransformNode;
   simple: Mesh;
   center: Vector3;
+  // footprint in chunk-local coordinates (y ignored)
+  fp: { minX: number; maxX: number; minZ: number; maxZ: number };
 };
 
 class Chunk {
@@ -508,6 +510,12 @@ const makeZLine = (name: string, x: number, mat: StandardMaterial) => {
           detail: built.detail,
           simple: built.simple,
           center,
+          fp: {
+            minX: built.root.position.x - w * 0.5,
+            maxX: built.root.position.x + w * 0.5,
+            minZ: built.root.position.z - d * 0.5,
+            maxZ: built.root.position.z + d * 0.5,
+          },
         });
       }
     }
@@ -516,6 +524,19 @@ const makeZLine = (name: string, x: number, mat: StandardMaterial) => {
     this.root.position.z = cz * WorldConfig.CHUNK_SIZE;
   }
 
+
+  getObstacleAabbsWorld() {
+    const ox = this.root.position.x;
+    const oz = this.root.position.z;
+    // small padding so characters don't visually clip into walls
+    const pad = 0.55;
+    return this.buildings.map((b) => ({
+      minX: ox + b.fp.minX - pad,
+      maxX: ox + b.fp.maxX + pad,
+      minZ: oz + b.fp.minZ - pad,
+      maxZ: oz + b.fp.maxZ + pad,
+    }));
+  }
   updateLOD(playerPos: Vector3) {
     const lodDist = WorldConfig.BUILDING_DETAIL_LOD_DIST;
     const lodDist2 = lodDist * lodDist;
@@ -631,4 +652,91 @@ export class ChunkWorld {
       }
     }
   }
+
+
+/**
+ * Resolve a 2D circle position against nearby building footprints.
+ * This keeps the player from walking through buildings and reduces visual overlap.
+ */
+resolveCircleAgainstBuildings(pos: Vector3, radius: number) {
+  // Check chunks in a small neighborhood around the position.
+  const s = WorldConfig.CHUNK_SIZE;
+  const cx0 = Math.round(pos.x / s);
+  const cz0 = Math.round(pos.z / s);
+
+  // A few iterations helps when pushing out of corners.
+  const skin = 0.012; // tiny extra push to avoid floating-point re-penetration
+  for (let iter = 0; iter < 4; iter++) {
+    let moved = false;
+
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const key = `${cx0 + dx}:${cz0 + dz}`;
+        const ch = this.loaded.get(key);
+        if (!ch) continue;
+
+        const aabbs = ch.getObstacleAabbsWorld();
+        for (const a of aabbs) {
+          // closest point on AABB to circle center
+          const cx = Math.max(a.minX, Math.min(pos.x, a.maxX));
+          const cz = Math.max(a.minZ, Math.min(pos.z, a.maxZ));
+          const vx = pos.x - cx;
+          const vz = pos.z - cz;
+          const d2 = vx * vx + vz * vz;
+          if (d2 >= radius * radius) continue;
+
+          const d = Math.sqrt(Math.max(1e-8, d2));
+          const push = radius - d + skin;
+
+          // Push out. If we're exactly on the closest point, push on the axis of least penetration.
+          if (d < 1e-4) {
+            const left = Math.abs(pos.x - a.minX);
+            const right = Math.abs(a.maxX - pos.x);
+            const down = Math.abs(pos.z - a.minZ);
+            const up = Math.abs(a.maxZ - pos.z);
+            const minPen = Math.min(left, right, down, up);
+            if (minPen === left) pos.x = a.minX - radius;
+            else if (minPen === right) pos.x = a.maxX + radius;
+            else if (minPen === down) pos.z = a.minZ - radius;
+            else pos.z = a.maxZ + radius;
+          } else {
+            pos.x += (vx / d) * push;
+            pos.z += (vz / d) * push;
+          }
+          moved = true;
+        }
+      }
+    }
+
+    if (!moved) break;
+  }
+}
+
+/**
+ * Fast overlap test for a 2D circle against nearby building AABBs.
+ * Used for spawn safety checks (missions/NPCs) so markers don't appear inside buildings.
+ */
+isCircleOverlappingBuildings(pos: Vector3, radius: number) {
+  const s = WorldConfig.CHUNK_SIZE;
+  const cx0 = Math.round(pos.x / s);
+  const cz0 = Math.round(pos.z / s);
+
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const key = `${cx0 + dx}:${cz0 + dz}`;
+      const ch = this.loaded.get(key);
+      if (!ch) continue;
+
+      const aabbs = ch.getObstacleAabbsWorld();
+      for (const a of aabbs) {
+        const cx = Math.max(a.minX, Math.min(pos.x, a.maxX));
+        const cz = Math.max(a.minZ, Math.min(pos.z, a.maxZ));
+        const vx = pos.x - cx;
+        const vz = pos.z - cz;
+        if (vx * vx + vz * vz < radius * radius) return true;
+      }
+    }
+  }
+  return false;
+}
 }

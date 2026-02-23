@@ -123,7 +123,7 @@ export class Player {
     this.root.position = new Vector3(0, 0, 0);
   }
 
-  update(dt: number, input: PlayerInput) {
+  update(dt: number, input: PlayerInput, resolveCollision?: (pos: Vector3, radius: number) => void) {
     this.animT += dt;
 
     // Look / yaw
@@ -140,7 +140,20 @@ export class Player {
     const moving = rawMove.lengthSquared() > 1e-4;
     if (moving) {
       rawMove.normalize();
-      this.root.position.addInPlace(rawMove.scale(speed * dt));
+      const fullDelta = rawMove.scale(speed * dt);
+
+      // Smoother collision: move in small sub-steps and resolve after each step.
+      // This greatly reduces "corner snagging" compared to axis-separate pushes.
+      const r = 0.55;
+      const maxStep = 1.2; // meters
+      const len = Math.sqrt(fullDelta.x * fullDelta.x + fullDelta.z * fullDelta.z);
+      const steps = Math.max(1, Math.ceil(len / maxStep));
+      const step = new Vector3(fullDelta.x / steps, 0, fullDelta.z / steps);
+
+      for (let i = 0; i < steps; i++) {
+        this.root.position.addInPlace(step);
+        resolveCollision?.(this.root.position, r);
+      }
     }
 
     // Jump
