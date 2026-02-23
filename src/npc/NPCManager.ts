@@ -67,6 +67,8 @@ export class NPCManager {
   private crowd!: ThinGroup;
   private fake!: ThinGroup;
 
+  private densityMul = 1;
+
   private simSkinMat: StandardMaterial;
   private simShirtMat: StandardMaterial;
   private simPantsMat: StandardMaterial;
@@ -237,8 +239,14 @@ export class NPCManager {
     return { sim: this.sim.length, crowd: this.crowd.count, fake: this.fake.count };
   }
 
+  setDensityMultiplier(v: number) {
+    // 1 = normal, <1 reduces total NPC counts (useful at night / low perf)
+    this.densityMul = Math.max(0.25, Math.min(1, v));
+  }
+
+
   private ensureSimPopulation(playerPos: Vector3) {
-    const max = WorldConfig.NPC_SIM_MAX;
+    const max = Math.max(0, Math.floor(WorldConfig.NPC_SIM_MAX * this.densityMul));
     while (this.sim.length < max) this.sim.push(this.spawnSimNPC(playerPos));
   }
 
@@ -843,7 +851,8 @@ export class NPCManager {
   }
 
   private ensureThinPopulation(group: ThinGroup, tier: Tier, playerPos: Vector3) {
-    const desired = tier === "crowd" ? WorldConfig.NPC_CROWD_MAX : WorldConfig.NPC_FAKE_MAX;
+    const baseDesired = tier === "crowd" ? WorldConfig.NPC_CROWD_MAX : WorldConfig.NPC_FAKE_MAX;
+    const desired = Math.max(0, Math.floor(baseDesired * this.densityMul));
     if (group.count === desired) return;
     group.count = desired;
 

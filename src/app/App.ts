@@ -1,3 +1,4 @@
+import { Color4 } from "@babylonjs/core";
 import { EngineHost } from "../engine/EngineHost";
 import { ChunkWorld } from "../world/ChunkWorld";
 import { Player } from "../game/Player";
@@ -22,6 +23,11 @@ export class App {
   private navCanvas: HTMLCanvasElement | null = null;
   private navCtx: CanvasRenderingContext2D | null = null;
   private navArrowEl: HTMLDivElement | null = null;
+  private timeEl: HTMLDivElement | null = null;
+  private timeSpeedEl: HTMLDivElement | null = null;
+  private timeSpeedSlider: HTMLInputElement | null = null;
+  private dayLengthSec = 240; // seconds per full day
+  private dayT = 0; // 0..1
   private fpsValue = 0;
   private fpsFrames = 0;
   private fpsLastSampleMs = 0;
@@ -61,6 +67,7 @@ export class App {
     this.mountMissionHud();
     this.mountPopupHud();
     this.mountNavHud();
+    this.mountTimeHud();
 
     this.host.bindResize(() => {
       this.camera.onResize();
@@ -70,6 +77,8 @@ export class App {
     this.host.run(() => {
       const dt = this.host.getDeltaSeconds();
       const input = this.controls.readInput();
+
+      this.tickDayNight(dt);
 
       // 탑승/하차 처리
       if (this.interactQueued) {
@@ -109,7 +118,7 @@ export class App {
       }
 
       this.world.update(refPos);
-      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
+      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r), this.vehicle.root.position, 1.35, this.vehicle.getSpeed?.() ?? 0);
       this.mission.update(dt, refPos);
 
       this.camera.addZoomDelta(input.zoom);
@@ -584,4 +593,138 @@ private updatePopupHud() {
       span.textContent = this.controls.isPitchInverted() ? "반전 ON" : "반전 OFF";
     }
   }
+
+  private smoothstep(edge0: number, edge1: number, x: number) {
+    const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  private getNightFactor(dayT: number) {
+    // dayT: 0..1, where 0=00:00, 0.25=06:00, 0.5=12:00, 0.75=18:00
+    const sunrise = 0.27; // ~06:30
+    const sunset = 0.75;  // ~18:00
+    // Daylight factor: 0 at night, 1 at day
+    const dayUp = this.smoothstep(sunrise - 0.05, sunrise + 0.05, dayT);
+    const dayDown = 1 - this.smoothstep(sunset - 0.06, sunset + 0.06, dayT);
+    const daylight = Math.max(0, Math.min(1, dayUp * dayDown));
+    return 1 - daylight; // night01
+  }
+
+  private formatTime(dayT: number) {
+    const totalMin = Math.floor(dayT * 24 * 60) % (24 * 60);
+    const hh = Math.floor(totalMin / 60);
+    const mm = totalMin % 60;
+    const pad = (n: number) => (n < 10 ? "0" + n : "" + n);
+    return `${pad(hh)}:${pad(mm)}`;
+  }
+
+  private tickDayNight(dt: number) {
+    // Advance simulated time
+    const speed = Math.max(30, this.dayLengthSec);
+    this.dayT = (this.dayT + dt / speed) % 1;
+
+    const night01 = this.getNightFactor(this.dayT);
+
+    // Sky color
+    const day = new Color4(0.62, 0.80, 0.98, 1);
+    const night = new Color4(0.03, 0.04, 0.07, 1);
+    const n = night01;
+    this.host.scene.clearColor = new Color4(
+      day.r * (1 - n) + night.r * n,
+      day.g * (1 - n) + night.g * n,
+      day.b * (1 - n) + night.b * n,
+      1
+    );
+
+    // World window emissive boost
+    this.world.setNightFactor?.(night01);
+
+    // Vehicle headlights & fake beam
+    this.vehicle.setNightFactor?.(night01);
+
+    // Slightly reduce NPC density at night for mood + perf
+    const density = 1 - 0.25 * night01; // down to 0.75 at full night
+    this.npc.setDensityMultiplier?.(density);
+
+    // HUD update
+    if (this.timeEl) {
+      this.timeEl.textContent = `시간 ${this.formatTime(this.dayT)}  |  ${night01 > 0.55 ? "밤" : "낮"}`;
+    }
+    if (this.timeSpeedEl) {
+      this.timeSpeedEl.textContent = `하루 길이 ${Math.round(this.dayLengthSec)}s`;
+    }
+  }
+
+  private mountTimeHud() {
+    const el = document.createElement("div");
+    el.id = "timeHud";
+    Object.assign(el.style, {
+      position: "fixed",
+      left: "50%",
+      transform: "translate(-50%, 0)",
+      top: "12px",
+      zIndex: "10000",
+      color: "#fff",
+      background: "rgba(0,0,0,0.45)",
+      padding: "8px 10px",
+      borderRadius: "10px",
+      fontSize: "13px",
+      fontWeight: "800",
+      lineHeight: "1.2",
+      backdropFilter: "blur(6px)",
+      userSelect: "none",
+      pointerEvents: "none",
+      letterSpacing: "0.2px",
+      maxWidth: "min(420px, calc(100vw - 24px))",
+    } as Partial<CSSStyleDeclaration>);
+    el.textContent = "시간 --:--";
+    document.body.appendChild(el);
+    this.timeEl = el;
+
+    // Speed control (interactive; pointerEvents enabled on container)
+    const wrap = document.createElement("div");
+    wrap.id = "timeSpeedWrap";
+    Object.assign(wrap.style, {
+      position: "fixed",
+      left: "50%",
+      transform: "translate(-50%, 0)",
+      top: "54px",
+      zIndex: "10001",
+      color: "#fff",
+      background: "rgba(0,0,0,0.45)",
+      padding: "8px 10px",
+      borderRadius: "10px",
+      fontSize: "12px",
+      fontWeight: "800",
+      lineHeight: "1.2",
+      backdropFilter: "blur(6px)",
+      userSelect: "none",
+      pointerEvents: "auto",
+      letterSpacing: "0.2px",
+    } as Partial<CSSStyleDeclaration>);
+    document.body.appendChild(wrap);
+
+    const label = document.createElement("div");
+    label.textContent = `하루 길이 ${Math.round(this.dayLengthSec)}s`;
+    label.style.marginBottom = "6px";
+    wrap.appendChild(label);
+    this.timeSpeedEl = label;
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "60";
+    slider.max = "600";
+    slider.step = "10";
+    slider.value = String(this.dayLengthSec);
+    slider.style.width = "220px";
+    wrap.appendChild(slider);
+    this.timeSpeedSlider = slider;
+
+    slider.addEventListener("input", () => {
+      const v = Number(slider.value);
+      if (Number.isFinite(v)) this.dayLengthSec = v;
+      if (this.timeSpeedEl) this.timeSpeedEl.textContent = `하루 길이 ${Math.round(this.dayLengthSec)}s`;
+    });
+  }
+
 }

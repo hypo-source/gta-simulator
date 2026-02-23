@@ -622,6 +622,19 @@ export class ChunkWorld {
     this.scene = scene;
   }
 
+  setNightFactor(night01: number) {
+    const n = Math.max(0, Math.min(1, night01));
+    // Window emissive boost at night
+    const win = this.scene.getMaterialByName("mat_window") as StandardMaterial | null;
+    if (win) {
+      // Base emissive roughly (0.06,0.08,0.1) in this project.
+      const base = new Color3(0.06, 0.08, 0.10);
+      const boosted = base.scale(1 + n * 5.0);
+      win.emissiveColor = boosted;
+    }
+  }
+
+
   update(playerPos: Vector3) {
     // drive traffic light animation
     const dt = this.scene.getEngine().getDeltaTime() * 0.001;

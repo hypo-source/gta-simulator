@@ -7,6 +7,7 @@ import {
   StandardMaterial,
   TransformNode,
   Vector3,
+  SpotLight,
 } from "@babylonjs/core";
 
 export type VehicleInput = {
@@ -24,6 +25,13 @@ export class Vehicle {
   public root: TransformNode;
   private vel = new Vector3(0, 0, 0);
   private yaw = 0;
+
+
+  private headLightL: SpotLight;
+  private headLightR: SpotLight;
+  private beamL: Mesh;
+  private beamR: Mesh;
+
 
   // Arcade tuning
   private maxSpeed = 34;
@@ -92,6 +100,36 @@ export class Vehicle {
       w.position.copyFrom(o);
     });
     wheelProto.dispose();
+    // Headlights (night-only; controlled by setNightFactor)
+    this.headLightL = new SpotLight("carHeadL", new Vector3(-0.55, 0.6, 1.95), new Vector3(0, -0.25, 1), Math.PI / 3.2, 18, scene);
+    this.headLightR = new SpotLight("carHeadR", new Vector3(0.55, 0.6, 1.95), new Vector3(0, -0.25, 1), Math.PI / 3.2, 18, scene);
+    this.headLightL.parent = this.root;
+    this.headLightR.parent = this.root;
+    this.headLightL.intensity = 0;
+    this.headLightR.intensity = 0;
+
+    // Fake beam mesh on the ground (very cheap)
+    const beamMat = new StandardMaterial("carBeamMat", scene);
+    beamMat.disableLighting = true;
+    beamMat.emissiveColor = new Color3(1, 1, 1);
+    beamMat.alpha = 0.0;
+    beamMat.backFaceCulling = false;
+
+    const mkBeam = (name: string) => {
+      const m = MeshBuilder.CreatePlane(name, { width: 1.0, height: 6.5 }, scene);
+      m.parent = this.root;
+      m.rotation.x = Math.PI / 2;
+      m.position.y = 0.03;
+      m.position.z = 4.6;
+      m.isPickable = false;
+      m.material = beamMat;
+      return m as Mesh;
+    };
+    this.beamL = mkBeam("carBeamL");
+    this.beamR = mkBeam("carBeamR");
+    this.beamL.position.x = -0.55;
+    this.beamR.position.x = 0.55;
+
   }
 
   distanceTo(pos: Vector3) {
@@ -167,4 +205,17 @@ export class Vehicle {
     this.root.position.z += this.vel.z * dt;
     this.root.rotation.y = this.yaw;
   }
+
+  setNightFactor(night01: number) {
+    const n = Math.max(0, Math.min(1, night01));
+    // Light intensities
+    const li = 6.5 * n;
+    this.headLightL.intensity = li;
+    this.headLightR.intensity = li;
+    // Beam alpha (visible only at night)
+    const a = 0.22 * n;
+    const mat = this.beamL.material as StandardMaterial | null;
+    if (mat) mat.alpha = a;
+  }
+
 }
