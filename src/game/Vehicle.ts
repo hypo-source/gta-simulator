@@ -100,6 +100,10 @@ export class Vehicle {
     return Math.sqrt(dx * dx + dz * dz);
   }
 
+  getSpeed() {
+    return Math.hypot(this.vel.x, this.vel.z);
+  }
+
   getExitPosition(): Vector3 {
     // Exit to right side
     const right = new Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));

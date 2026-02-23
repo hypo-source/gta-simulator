@@ -29,6 +29,10 @@ type SimNPC = {
   idleLeft: number;
   idlePhase: number;
   desiredYaw: number;
+  // vehicle bump wobble
+  stumbleT: number;
+  stumblePhase: number;
+  lastVehicleHitMs: number;
   yaw: number;
   prevPos: Vector3;
   fade: number;
@@ -65,6 +69,11 @@ export class NPCManager {
   private simPantsMat: StandardMaterial;
 
   private thinMatCache = new Map<string, StandardMaterial>();
+
+  // Vehicle bump audio (very light WebAudio beep)
+  private audioCtx: AudioContext | null = null;
+  private lastBumpBeepMs = -1e9;
+
   private seed = 1337;
   private scene: Scene;
 
@@ -126,7 +135,8 @@ export class NPCManager {
     playerPos: Vector3,
     resolveCollision?: (pos: Vector3, radius: number) => void,
     vehiclePos?: Vector3,
-    vehicleRadius: number = 1.35
+    vehicleRadius: number = 1.35,
+    vehicleSpeed: number = 0
   ) {
     // compute player planar speed for adaptive handoff budget
     if (Number.isNaN(this.lastPlayerPos.x)) this.lastPlayerPos.copyFrom(playerPos);
@@ -141,9 +151,51 @@ export class NPCManager {
 
     this.tryHandoffCrowdToSim(dt, playerPos);
 
-    this.updateSim(dt, playerPos, resolveCollision, vehiclePos, vehicleRadius);
+    this.updateSim(dt, playerPos, resolveCollision, vehiclePos, vehicleRadius, vehicleSpeed);
     this.updateThin(dt, this.crowd, "crowd", playerPos);
     this.updateThin(dt, this.fake, "fake", playerPos);
+  }
+
+
+  private playBumpBeep(nowMs: number, strength01: number) {
+    // Avoid spam
+    if (nowMs - this.lastBumpBeepMs < 120) return;
+    this.lastBumpBeepMs = nowMs;
+
+    try {
+      if (!this.audioCtx) {
+        const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as
+          | typeof AudioContext
+          | undefined;
+        if (!Ctx) return;
+        this.audioCtx = new Ctx();
+      }
+      // Resume if suspended (mobile gesture requirements may block; fail silently)
+      if (this.audioCtx.state === "suspended") {
+        this.audioCtx.resume().catch(() => {});
+      }
+
+      const ctx = this.audioCtx;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      const t0 = ctx.currentTime;
+      const freq = 200 + 140 * Math.max(0, Math.min(1, strength01));
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, t0);
+
+      const vol = 0.015 + 0.02 * Math.max(0, Math.min(1, strength01));
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.075);
+    } catch {
+      // ignore
+    }
   }
 
   getStats() {
@@ -236,6 +288,9 @@ export class NPCManager {
     idleLeft: 0,
     idlePhase: this.rand() * Math.PI * 2,
     desiredYaw: 0,
+    stumbleT: 0,
+    stumblePhase: this.rand() * Math.PI * 2,
+    lastVehicleHitMs: -1e9,
     yaw: 0,
     prevPos: root.position.clone(),
     fade: 0,
@@ -254,7 +309,8 @@ export class NPCManager {
     playerPos: Vector3,
     resolveCollision?: (pos: Vector3, radius: number) => void,
     vehiclePos?: Vector3,
-    vehicleRadius: number = 1.35
+    vehicleRadius: number = 1.35,
+    vehicleSpeed: number = 0
   ) {
     for (const npc of this.sim) {
       // Keep sim around player
@@ -346,31 +402,52 @@ export class NPCManager {
             npc.root.position.x += (dxp / d) * push;
             npc.root.position.z += (dzp / d) * push;
           }
+        }
 
-        // Avoid the vehicle (bigger radius, slightly stronger push).
+        // Vehicle avoidance / bump (optional): NPC yields to car and gets a light "stumble" on contact.
         if (vehiclePos) {
           const dxv = npc.root.position.x - vehiclePos.x;
           const dzv = npc.root.position.z - vehiclePos.z;
           const d2v = dxv * dxv + dzv * dzv;
 
-          // Vehicle is treated as a fat circle for cheap avoidance/collision.
-          // NPC radius ~0.48; add a small buffer so they don't graze the body.
-          const minR = vehicleRadius + 0.48 + 0.25;
-          if (d2v > 1e-6 && d2v < minR * minR) {
+          const speed01 = Math.max(0, Math.min(1, vehicleSpeed / 18));
+          const npcR = 0.55;
+          const baseR = vehicleRadius + npcR;
+          // React earlier at higher speeds
+          const reactR = baseR + speed01 * 2.2;
+
+          if (d2v > 1e-6 && d2v < reactR * reactR) {
             const d = Math.sqrt(d2v);
-            // Stronger push when very close, milder near boundary.
-            const t = 1 - d / minR; // 0..1
-            const push = (minR - d) * (1.0 + t * 0.9);
+            const nx = dxv / d;
+            const nz = dzv / d;
 
-            npc.root.position.x += (dxv / d) * push;
-            npc.root.position.z += (dzv / d) * push;
+            // Avoid zone: bias yaw + slight position nudge.
+            const t = 1 - d / reactR;
+            const side = Math.sin(npc.phase * 3.17) >= 0 ? 1 : -1;
+            npc.desiredYaw += side * (0.28 + 0.65 * speed01) * t;
 
-            // Nudge yaw so NPC tends to step aside instead of oscillating.
-            const sign = Math.sin(npc.phase * 2.13) >= 0 ? 1 : -1;
-            npc.desiredYaw += sign * (0.35 + t * 0.35);
+            const avoidPush = (0.05 + 0.12 * speed01) * t;
+            npc.root.position.x += nx * avoidPush;
+            npc.root.position.z += nz * avoidPush;
+
+            // Contact zone: push out + stumble.
+            const pen = baseR - d;
+            if (pen > 0) {
+              const bump = pen * (1.0 + 1.2 * speed01);
+              npc.root.position.x += nx * bump;
+              npc.root.position.z += nz * bump;
+
+              const nowMs = performance.now();
+              if (nowMs - npc.lastVehicleHitMs > 180) {
+                npc.lastVehicleHitMs = nowMs;
+                npc.stumbleT = Math.max(npc.stumbleT, 0.26 + 0.22 * speed01);
+                npc.stumblePhase += (0.5 + this.rand()) * Math.PI;
+                this.playBumpBeep(nowMs, speed01);
+              }
+            }
           }
         }
-        }
+
       }
       npc.moveRampLeft = Math.max(0, npc.moveRampLeft - dt);
 
@@ -444,6 +521,19 @@ export class NPCManager {
     npc.head.rotation.y += (targetHeadYaw - npc.head.rotation.y) * Math.min(1, safeDt * 10);
     npc.head.rotation.x += (targetHeadPitch - npc.head.rotation.x) * Math.min(1, safeDt * 8);
     npc.torso.rotation.y += (targetTorsoYaw - npc.torso.rotation.y) * Math.min(1, safeDt * 6);
+
+    // Vehicle stumble wobble (very light, short)
+    if (npc.stumbleT > 0) {
+      npc.stumbleT = Math.max(0, npc.stumbleT - dt);
+      const k = Math.max(0, Math.min(1, npc.stumbleT / 0.5));
+      const wob = Math.sin(performance.now() * 0.02 + npc.stumblePhase) * 0.45 * k;
+      npc.torso.rotation.z = wob;
+      npc.head.rotation.z = wob * 0.65;
+    } else {
+      // Relax back to upright
+      npc.torso.rotation.z *= Math.max(0, 1 - dt * 12);
+      npc.head.rotation.z *= Math.max(0, 1 - dt * 12);
+    }
 
     // Spawn fade-in (Sim appears gradually in transition zone)
     if (npc.fade < 1) {
