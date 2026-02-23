@@ -8,6 +8,7 @@ import { WorldConfig } from "../world/WorldConfig";
 import { NPCManager } from "../npc/NPCManager";
 import { MissionManager } from "../game/MissionManager";
 import { Vehicle } from "../game/Vehicle";
+import { PoliceManager } from "../game/PoliceManager";
 
 export class App {
   private host: EngineHost;
@@ -37,6 +38,8 @@ export class App {
   private inVehicle = false;
   private interactQueued = false;
   private playerBaseScale = 0.75;
+  private police!: PoliceManager;
+  private wantedEl: HTMLDivElement | null = null;
 
   // Auto quality state
   private qLowMs = 0;
@@ -54,9 +57,15 @@ export class App {
 		this.camera = new CameraController(scene, this.player.root);
     this.controls = new TouchControls(this.host.canvas);
     this.npc = new NPCManager(scene);
+    this.npc.onNpcHit = () => {
+      console.log("CALL POLICE");   // 👈 추가
+      this.police.notifyNpcHit();
+    };
     this.mission = new MissionManager(scene, (pos, r) => this.world.isCircleOverlappingBuildings(pos, r));
     this.vehicle = new Vehicle(scene);
     this.playerBaseScale = this.player.root.scaling.x || 0.75;
+    this.police = new PoliceManager(scene);
+    this.mountWantedHud();
 
     window.addEventListener("keydown", (e) => {
       if (e.code === "KeyE" && !e.repeat) this.interactQueued = true;
@@ -118,8 +127,26 @@ export class App {
       }
 
       this.world.update(refPos);
-      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r), this.vehicle.root.position, 1.35, this.vehicle.getSpeed?.() ?? 0);
+      const vehiclePos = this.vehicle?.root?.position;
+      const vehicleRadius = 1.35;
+      const vehicleSpeed = this.vehicle?.getSpeed?.() ?? 0;
+      this.npc.update(
+        dt,
+        refPos,
+        (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r),
+        vehiclePos,
+        vehicleRadius,
+        vehicleSpeed
+      );
       this.mission.update(dt, refPos);
+      // ✅ 경찰 업데이트
+      this.police.update(dt, this.player.root.position);
+
+      // ✅ ⭐ HUD 업데이트 (여기에 넣는다)
+      if (this.wantedEl) {
+        this.wantedEl.textContent =
+          this.police.getWantedLevel() > 0 ? "⭐ WANTED" : "";
+      }
 
       this.camera.addZoomDelta(input.zoom);
       this.camera.updateWithInput(dt, input.lookY);
@@ -129,6 +156,7 @@ export class App {
       this.updatePopupHud();
       this.updateNavHud();
       this.autoQuality(dt);
+      
     });
   }
 
@@ -247,6 +275,19 @@ export class App {
     el.textContent = "FPS --";
     document.body.appendChild(el);
     this.fpsEl = el;
+  }
+
+  private mountWantedHud() {
+    const el = document.createElement("div");
+    el.style.position = "fixed";
+    el.style.right = "20px";
+    el.style.top = "60px";
+    el.style.fontSize = "22px";
+    el.style.fontWeight = "bold";
+    el.style.color = "red";
+    el.style.zIndex = "10000";
+    document.body.appendChild(el);
+    this.wantedEl = el;
   }
 
   

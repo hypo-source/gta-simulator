@@ -68,6 +68,7 @@ export class NPCManager {
   private fake!: ThinGroup;
 
   private densityMul = 1;
+  public onNpcHit?: () => void;
 
   private simSkinMat: StandardMaterial;
   private simShirtMat: StandardMaterial;
@@ -518,6 +519,8 @@ export class NPCManager {
               // Trigger stumble (short wobble) + tiny beep with cooldown
               if (npc.hitSfxCooldown <= 0) {
                 npc.hitSfxCooldown = 0.12;
+                console.log('npc hit!')
+                this.onNpcHit?.();
                 this.playNpcHitBeep(this.clamp((bumpR - d) / bumpR + sp01 * 0.25, 0, 1));
               }
               npc.stumbleT = Math.max(npc.stumbleT, 0.42);
