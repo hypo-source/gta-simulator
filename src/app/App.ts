@@ -19,6 +19,9 @@ export class App {
   private missionEl: HTMLDivElement | null = null;
   private popupEl: HTMLDivElement | null = null;
   private missionBtn: HTMLButtonElement | null = null;
+  private navCanvas: HTMLCanvasElement | null = null;
+  private navCtx: CanvasRenderingContext2D | null = null;
+  private navArrowEl: HTMLDivElement | null = null;
   private fpsValue = 0;
   private fpsFrames = 0;
   private fpsLastSampleMs = 0;
@@ -57,6 +60,7 @@ export class App {
     this.mountFpsHud();
     this.mountMissionHud();
     this.mountPopupHud();
+    this.mountNavHud();
 
     this.host.bindResize(() => {
       this.camera.onResize();
@@ -66,10 +70,6 @@ export class App {
     this.host.run(() => {
       const dt = this.host.getDeltaSeconds();
       const input = this.controls.readInput();
-
-      const VEHICLE_RADIUS = 1.25;
-
-      let didWorldUpdate = false;
 
       // 탑승/하차 처리
       if (this.interactQueued) {
@@ -101,26 +101,15 @@ export class App {
 
         this.vehicle.update(dt, { throttle, steer, boost, handbrake });
 
-
-        // 차량 ↔ 건물 충돌/슬라이딩 (플레이어와 동일한 AABB 리졸버 재사용)
-        // NOTE: resolveCircleAgainstBuildings는 loaded chunk만 검사하므로,
-        // 먼저 world.update를 한번 호출해 차량 주변 청크를 로드한다.
-        this.world.update(this.vehicle.root.position);
-        didWorldUpdate = true;
-
-        const attempted = this.vehicle.root.position.clone();
-        this.world.resolveCircleAgainstBuildings(this.vehicle.root.position, VEHICLE_RADIUS);
-        const push = this.vehicle.root.position.subtract(attempted);
-        this.vehicle.applyCollisionPush(push, dt);
-
         // 카메라/미션/월드가 player root 기반이라 player root를 차량에 붙여준다
         this.player.root.position.copyFrom(this.vehicle.root.position);
         this.player.root.rotation.y = this.vehicle.root.rotation.y;
       } else {
         this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       }
-      if (!didWorldUpdate) this.world.update(refPos);
-      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r), this.vehicle.root.position, VEHICLE_RADIUS, this.vehicle.getSpeed());
+
+      this.world.update(refPos);
+      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       this.mission.update(dt, refPos);
 
       this.camera.addZoomDelta(input.zoom);
@@ -129,6 +118,7 @@ export class App {
       this.updateFpsHud();
       this.updateMissionHud();
       this.updatePopupHud();
+      this.updateNavHud();
       this.autoQuality(dt);
     });
   }
@@ -320,6 +310,179 @@ private updatePopupHud() {
   this.popupEl.style.opacity = String(p.alpha);
   this.popupEl.style.transform = `translate(-50%, -50%) scale(${p.scale.toFixed(3)})`;
 }
+
+  private mountNavHud() {
+    // Circular minimap + edge arrow indicator for current mission target
+    const canvas = document.createElement("canvas");
+    canvas.id = "navMiniMap";
+    canvas.width = 160;
+    canvas.height = 160;
+
+    Object.assign(canvas.style, {
+      position: "fixed",
+      left: "12px",
+      bottom: "96px",
+      width: "160px",
+      height: "160px",
+      borderRadius: "50%",
+      background: "rgba(0,0,0,0.25)",
+      border: "1px solid rgba(255,255,255,0.18)",
+      boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
+      zIndex: "10000",
+      pointerEvents: "none",
+      backdropFilter: "blur(6px)",
+    } as Partial<CSSStyleDeclaration>);
+
+    document.body.appendChild(canvas);
+    this.navCanvas = canvas;
+    this.navCtx = canvas.getContext("2d");
+
+    const arrow = document.createElement("div");
+    arrow.id = "navEdgeArrow";
+    Object.assign(arrow.style, {
+      position: "fixed",
+      width: "0",
+      height: "0",
+      borderLeft: "12px solid transparent",
+      borderRight: "12px solid transparent",
+      borderBottom: "20px solid rgba(40,220,255,0.92)",
+      filter: "drop-shadow(0 6px 10px rgba(0,0,0,0.35))",
+      zIndex: "10002",
+      pointerEvents: "none",
+      transformOrigin: "50% 60%",
+      opacity: "0",
+    } as Partial<CSSStyleDeclaration>);
+    document.body.appendChild(arrow);
+    this.navArrowEl = arrow;
+  }
+
+  private updateNavHud() {
+    const ctx = this.navCtx;
+    const canvas = this.navCanvas;
+    if (!ctx || !canvas) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const radius = Math.min(w, h) * 0.5 - 6;
+
+    // Clear
+    ctx.clearRect(0, 0, w, h);
+
+    // Background circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+
+    // Subtle background
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    ctx.fillRect(0, 0, w, h);
+
+    // Grid rings
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.66, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 0.33, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Heading (player forward)
+    const yaw = this.player?.root?.rotation?.y ?? 0;
+    // 0 rad means +Z forward in our world; minimap 0 should point up.
+    const headingX = Math.sin(yaw);
+    const headingY = -Math.cos(yaw);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + headingX * radius * 0.55, cy + headingY * radius * 0.55);
+    ctx.stroke();
+
+    // Player dot
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Target
+    const info = this.mission.getTargetInfo?.();
+    const arrowEl = this.navArrowEl;
+
+    if (info && this.player?.root?.position) {
+      const p = this.player.root.position;
+      const dx = info.pos.x - p.x;
+      const dz = info.pos.z - p.z;
+
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const maxRange = 140; // meters mapped to edge of minimap
+
+      // World angle: 0 => +Z (forward), + => right
+      const worldAngle = Math.atan2(dx, dz);
+      const rel = worldAngle - yaw;
+
+      // Map to minimap space (relative to heading, so forward is up)
+      const t = Math.min(1, dist / maxRange);
+      const px = cx + Math.sin(rel) * (radius * 0.9 * t);
+      const py = cy - Math.cos(rel) * (radius * 0.9 * t);
+
+      // Color by phase (pickup: blue, dropoff: green)
+      const isPickup = info.phase === "pickup";
+      ctx.fillStyle = isPickup ? "rgba(70,140,255,0.95)" : "rgba(70,255,140,0.95)";
+      ctx.beginPath();
+      ctx.arc(px, py, 6, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Edge arrow indicator (always show when mission active)
+      if (arrowEl) {
+        const winW = window.innerWidth;
+        const winH = window.innerHeight;
+        const scx = winW * 0.5;
+        const scy = winH * 0.5;
+        const margin = 38;
+        const rr = Math.min(scx, scy) - margin;
+
+        // For screen placement, use relative angle as well (forward is up)
+        const sx = scx + Math.sin(rel) * rr;
+        const sy = scy - Math.cos(rel) * rr;
+
+        arrowEl.style.left = `${sx}px`;
+        arrowEl.style.top = `${sy}px`;
+        const deg = (rel * 180) / Math.PI;
+        arrowEl.style.transform = `translate(-50%,-50%) rotate(${deg}deg)`;
+        arrowEl.style.opacity = "0.95";
+        // Phase color
+        arrowEl.style.borderBottomColor = isPickup
+          ? "rgba(70,140,255,0.92)"
+          : "rgba(70,255,140,0.92)";
+      }
+    } else {
+      // No active mission => hide edge arrow
+      if (arrowEl) arrowEl.style.opacity = "0";
+    }
+
+    // Compass "N" (world north = +Z = up when yaw==0)
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = "700 12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText("N", cx, 10);
+
+    ctx.restore();
+
+    // Outer stroke
+    ctx.strokeStyle = "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
 
   private autoQuality(dt: number) {
     // Keep FPS high by dynamically adjusting load radius + window density.

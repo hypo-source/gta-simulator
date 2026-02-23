@@ -213,6 +213,21 @@ export class MissionManager {
     return { text: p.text, color: p.color, alpha: a, scale };
   }
 
+  /** 현재 목표(픽업/드롭) 정보. HUD/미니맵용 */
+  getTargetInfo() {
+    if (this.phase === "pickup" || this.phase === "dropoff") {
+      return {
+        phase: this.phase,
+        pos: this.targetPos.clone(),
+        timeLeft: this.timeLeft,
+        deliveries: this.deliveries,
+        score: this.score,
+      };
+    }
+    return null;
+  }
+
+
 
   // --- Internal
 
