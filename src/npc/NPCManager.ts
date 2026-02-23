@@ -29,16 +29,19 @@ type SimNPC = {
   idleLeft: number;
   idlePhase: number;
   desiredYaw: number;
-  // vehicle bump wobble
-  stumbleT: number;
-  stumblePhase: number;
-  lastVehicleHitMs: number;
   yaw: number;
   prevPos: Vector3;
   fade: number;
   moveRampLeft: number; // 0.3s ramp after spawn/handoff
   waypoints: Vector3[];
   wpIndex: number;
+  behavior: "normal" | "runner" | "phone";
+  obeyTraffic: boolean;
+  phonePauseLeft: number;
+  stumbleT: number;
+  stumblePhase: number;
+  hitSfxCooldown: number;
+
 };
 
 type ThinGroup = {
@@ -69,11 +72,6 @@ export class NPCManager {
   private simPantsMat: StandardMaterial;
 
   private thinMatCache = new Map<string, StandardMaterial>();
-
-  // Vehicle bump audio (very light WebAudio beep)
-  private audioCtx: AudioContext | null = null;
-  private lastBumpBeepMs = -1e9;
-
   private seed = 1337;
   private scene: Scene;
 
@@ -96,6 +94,85 @@ export class NPCManager {
   private readonly CROSSWALK_WIDTH = 3.2; // must match ChunkWorld cwDepth (thickness)
   private readonly CROWD_FADE_IN_SPEED = 3.5;
 
+
+  // Simple traffic signal (global, deterministic):
+  // - 0..8s: cars X-direction green (pedestrians crossing E-W allowed)
+  // - 8..16s: cars Z-direction green (pedestrians crossing N-S allowed)
+  private trafficCarsXGreen(tSec: number) {
+    const phase = tSec % 16;
+    return phase < 8;
+  }
+
+  private canPedCrossNS(tSec: number) {
+    // N-S crossing goes over the X-road; allowed when cars X are NOT green
+    return !this.trafficCarsXGreen(tSec);
+  }
+
+  private canPedCrossEW(tSec: number) {
+    // E-W crossing goes over the Z-road; allowed when cars X ARE green
+    return this.trafficCarsXGreen(tSec);
+  }
+
+  private isCrosswalkEntry(wp: Vector3, next: Vector3): "NS" | "EW" | null {
+    const halfRoad = this.ROAD_W * 0.5;
+    const pad = 0.6;
+    // NS: x near ±CROSSWALK_OFFSET and heading toward z=0
+    const isNS =
+      Math.abs(Math.abs(wp.x) - this.CROSSWALK_OFFSET) < 0.85 &&
+      Math.abs(next.x - wp.x) < 0.25 &&
+      Math.abs(next.z) < 0.25 &&
+      Math.abs(Math.abs(wp.z) - (halfRoad + pad)) < 1.25;
+
+    if (isNS) return "NS";
+
+    // EW: z near ±CROSSWALK_OFFSET and heading toward x=0
+    const isEW =
+      Math.abs(Math.abs(wp.z) - this.CROSSWALK_OFFSET) < 0.85 &&
+      Math.abs(next.z - wp.z) < 0.25 &&
+      Math.abs(next.x) < 0.25 &&
+      Math.abs(Math.abs(wp.x) - (halfRoad + pad)) < 1.25;
+
+    if (isEW) return "EW";
+    return null;
+  }
+
+  private ensureHitAudio() {
+    // Lazy-create a shared AudioContext
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    if (!w.__npcHitAudio) {
+      const Ctx = (window.AudioContext || (window as any).webkitAudioContext);
+      if (!Ctx) return null;
+      w.__npcHitAudio = { ctx: new Ctx(), lastPlay: 0 };
+    }
+    return w.__npcHitAudio as { ctx: AudioContext; lastPlay: number } | null;
+  }
+
+  private playNpcHitBeep(strength01: number) {
+    const audio = this.ensureHitAudio();
+    if (!audio) return;
+    const now = audio.ctx.currentTime;
+    // global limiter
+    if (now - audio.lastPlay < 0.08) return;
+    audio.lastPlay = now;
+
+    const osc = audio.ctx.createOscillator();
+    const gain = audio.ctx.createGain();
+    osc.type = "triangle";
+    // Slightly vary pitch
+    const f = 260 + 220 * Math.max(0, Math.min(1, strength01));
+    osc.frequency.setValueAtTime(f, now);
+
+    const v = 0.03 * Math.max(0.2, Math.min(1, strength01));
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(v, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+
+    osc.connect(gain);
+    gain.connect(audio.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
   constructor(scene: Scene) {
     this.scene = scene;
 
@@ -154,48 +231,6 @@ export class NPCManager {
     this.updateSim(dt, playerPos, resolveCollision, vehiclePos, vehicleRadius, vehicleSpeed);
     this.updateThin(dt, this.crowd, "crowd", playerPos);
     this.updateThin(dt, this.fake, "fake", playerPos);
-  }
-
-
-  private playBumpBeep(nowMs: number, strength01: number) {
-    // Avoid spam
-    if (nowMs - this.lastBumpBeepMs < 120) return;
-    this.lastBumpBeepMs = nowMs;
-
-    try {
-      if (!this.audioCtx) {
-        const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as
-          | typeof AudioContext
-          | undefined;
-        if (!Ctx) return;
-        this.audioCtx = new Ctx();
-      }
-      // Resume if suspended (mobile gesture requirements may block; fail silently)
-      if (this.audioCtx.state === "suspended") {
-        this.audioCtx.resume().catch(() => {});
-      }
-
-      const ctx = this.audioCtx;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      const t0 = ctx.currentTime;
-      const freq = 200 + 140 * Math.max(0, Math.min(1, strength01));
-      osc.type = "triangle";
-      osc.frequency.setValueAtTime(freq, t0);
-
-      const vol = 0.015 + 0.02 * Math.max(0, Math.min(1, strength01));
-      gain.gain.setValueAtTime(0.0001, t0);
-      gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.008);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.07);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(t0);
-      osc.stop(t0 + 0.075);
-    } catch {
-      // ignore
-    }
   }
 
   getStats() {
@@ -288,16 +323,19 @@ export class NPCManager {
     idleLeft: 0,
     idlePhase: this.rand() * Math.PI * 2,
     desiredYaw: 0,
-    stumbleT: 0,
-    stumblePhase: this.rand() * Math.PI * 2,
-    lastVehicleHitMs: -1e9,
     yaw: 0,
     prevPos: root.position.clone(),
     fade: 0,
     moveRampLeft: this.SIM_MOVE_RAMP_SEC,
     waypoints: [],
     wpIndex: 0,
-  };
+    behavior: (this.rand() < 0.18 ? "runner" : (this.rand() < 0.36 ? "phone" : "normal")),
+  obeyTraffic: this.rand() < 0.35,
+  phonePauseLeft: 0,
+  stumbleT: 0,
+  stumblePhase: this.rand() * Math.PI * 2,
+  hitSfxCooldown: 0,
+};
   // Plan first route so Sim never starts by spawning or targeting inside road lanes.
   this.planWalkChain(npc, around, WorldConfig.NPC_SIM_RADIUS);
   npc.prevPos.copyFrom(npc.root.position);
@@ -333,15 +371,57 @@ export class NPCManager {
 
       if (npc.mode === "idle") {
         npc.idleLeft -= dt;
+        npc.phonePauseLeft = Math.max(0, npc.phonePauseLeft - dt);
+        npc.hitSfxCooldown = Math.max(0, npc.hitSfxCooldown - dt);
+
+        // If waiting at a crosswalk entry and the light is still red, keep waiting.
+        if (npc.obeyTraffic && npc.wpIndex < npc.waypoints.length) {
+          const axis = this.isCrosswalkEntry(npc.target, npc.waypoints[npc.wpIndex]);
+          if (axis) {
+            const tSec = performance.now() * 0.001;
+            const can = axis === "NS" ? this.canPedCrossNS(tSec) : this.canPedCrossEW(tSec);
+            if (!can) {
+              npc.idleLeft = Math.max(npc.idleLeft, 0.12);
+              continue;
+            }
+          }
+        }
+
         if (npc.idleLeft <= 0) {
           npc.mode = "walk";
-          this.planWalkChain(npc, playerPos, WorldConfig.NPC_SIM_RADIUS);
+          // Phone pause resumes walking toward the same target (no replanning).
+          if (npc.phonePauseLeft <= 0) {
+            this.planWalkChain(npc, playerPos, WorldConfig.NPC_SIM_RADIUS);
+          }
         }
       }
-
       if (npc.mode === "walk") {
         const to = npc.target.subtract(npc.root.position);
         const dist = Math.sqrt(to.x * to.x + to.z * to.z);
+
+        // Phone-type NPC: occasionally pause for a brief moment (checking phone)
+        if (npc.behavior === "phone" && npc.mode === "walk" && npc.phonePauseLeft <= 0) {
+          // approx 1% chance per second when moving
+          if (dist > 0.6 && this.rand() < dt * 0.01) {
+            npc.phonePauseLeft = 0.45 + this.rand() * 0.9;
+            npc.mode = "idle";
+            npc.idleLeft = npc.phonePauseLeft;
+          }
+        }
+
+        // Traffic light: stop at crosswalk entry when red (only for some NPCs)
+        if (npc.obeyTraffic && npc.wpIndex < npc.waypoints.length) {
+          const axis = this.isCrosswalkEntry(npc.target, npc.waypoints[npc.wpIndex]);
+          if (axis && dist < 1.25) {
+            const tSec = performance.now() * 0.001;
+            const can = axis === "NS" ? this.canPedCrossNS(tSec) : this.canPedCrossEW(tSec);
+            if (!can) {
+              npc.mode = "idle";
+              npc.idleLeft = Math.max(npc.idleLeft, 0.12);
+            }
+          }
+        }
+
         if (dist < 0.7) {
 
 	          // Waypoint chaining: if we are in the middle of a crosswalk route, consume waypoints first.
@@ -362,8 +442,11 @@ export class NPCManager {
           const dirZ = to.z / dist;
           npc.desiredYaw = Math.atan2(dirX, dirZ);
           const moveMul = 1 - this.clamp(npc.moveRampLeft / this.SIM_MOVE_RAMP_SEC, 0, 1);
-          npc.root.position.x += dirX * npc.speed * moveMul * dt;
-          npc.root.position.z += dirZ * npc.speed * moveMul * dt;
+          const behaviorMul = npc.behavior === "runner" ? 1.7 : (npc.behavior === "phone" ? 0.72 : 1.0);
+          const paused = npc.phonePauseLeft > 0 ? 1 : 0;
+          const sp = npc.speed * behaviorMul * (paused ? 0 : 1);
+          npc.root.position.x += dirX * sp * moveMul * dt;
+          npc.root.position.z += dirZ * sp * moveMul * dt;
         }
       }
 
@@ -404,50 +487,46 @@ export class NPCManager {
           }
         }
 
-        // Vehicle avoidance / bump (optional): NPC yields to car and gets a light "stumble" on contact.
+        // Vehicle interaction: avoid / bump / stumble (optional)
         if (vehiclePos) {
           const dxv = npc.root.position.x - vehiclePos.x;
           const dzv = npc.root.position.z - vehiclePos.z;
           const d2v = dxv * dxv + dzv * dzv;
 
-          const speed01 = Math.max(0, Math.min(1, vehicleSpeed / 18));
-          const npcR = 0.55;
-          const baseR = vehicleRadius + npcR;
-          // React earlier at higher speeds
-          const reactR = baseR + speed01 * 2.2;
+          // Increase reaction radius with vehicle speed
+          const sp01 = this.clamp(vehicleSpeed / 18, 0, 1);
+          const reactR = (vehicleRadius + 0.95) + sp01 * 2.2;
+          const bumpR = (vehicleRadius + 0.72);
 
           if (d2v > 1e-6 && d2v < reactR * reactR) {
             const d = Math.sqrt(d2v);
             const nx = dxv / d;
             const nz = dzv / d;
 
-            // Avoid zone: bias yaw + slight position nudge.
-            const t = 1 - d / reactR;
-            const side = Math.sin(npc.phase * 3.17) >= 0 ? 1 : -1;
-            npc.desiredYaw += side * (0.28 + 0.65 * speed01) * t;
-
-            const avoidPush = (0.05 + 0.12 * speed01) * t;
-            npc.root.position.x += nx * avoidPush;
-            npc.root.position.z += nz * avoidPush;
-
-            // Contact zone: push out + stumble.
-            const pen = baseR - d;
-            if (pen > 0) {
-              const bump = pen * (1.0 + 1.2 * speed01);
-              npc.root.position.x += nx * bump;
-              npc.root.position.z += nz * bump;
-
-              const nowMs = performance.now();
-              if (nowMs - npc.lastVehicleHitMs > 180) {
-                npc.lastVehicleHitMs = nowMs;
-                npc.stumbleT = Math.max(npc.stumbleT, 0.26 + 0.22 * speed01);
-                npc.stumblePhase += (0.5 + this.rand()) * Math.PI;
-                this.playBumpBeep(nowMs, speed01);
+            // Soft push when nearby, stronger when penetrating
+            let push = 0;
+            if (d < bumpR) {
+              push = (bumpR - d) * (1.6 + sp01 * 1.2);
+              // Trigger stumble (short wobble) + tiny beep with cooldown
+              if (npc.hitSfxCooldown <= 0) {
+                npc.hitSfxCooldown = 0.12;
+                this.playNpcHitBeep(this.clamp((bumpR - d) / bumpR + sp01 * 0.25, 0, 1));
               }
+              npc.stumbleT = Math.max(npc.stumbleT, 0.42);
+            } else {
+              push = (reactR - d) * (0.45 + sp01 * 0.55);
             }
+
+            npc.root.position.x += nx * push;
+            npc.root.position.z += nz * push;
+
+            // Encourage turning away from the car
+            npc.desiredYaw = Math.atan2(nx, nz) + (Math.sin(npc.phase * 2.7) >= 0 ? 0.55 : -0.55);
+
+            // Resolve against buildings after push so we don't clip into walls
+            if (resolveCollision) resolveCollision(npc.root.position, 0.48);
           }
         }
-
       }
       npc.moveRampLeft = Math.max(0, npc.moveRampLeft - dt);
 
@@ -522,17 +601,35 @@ export class NPCManager {
     npc.head.rotation.x += (targetHeadPitch - npc.head.rotation.x) * Math.min(1, safeDt * 8);
     npc.torso.rotation.y += (targetTorsoYaw - npc.torso.rotation.y) * Math.min(1, safeDt * 6);
 
-    // Vehicle stumble wobble (very light, short)
-    if (npc.stumbleT > 0) {
-      npc.stumbleT = Math.max(0, npc.stumbleT - dt);
-      const k = Math.max(0, Math.min(1, npc.stumbleT / 0.5));
-      const wob = Math.sin(performance.now() * 0.02 + npc.stumblePhase) * 0.45 * k;
-      npc.torso.rotation.z = wob;
-      npc.head.rotation.z = wob * 0.65;
+    // Phone pose + stumble wobble (very light)
+    if (npc.behavior === "phone") {
+      // look slightly down and hold phone with right arm
+      const phonePitch = 0.55;
+      npc.head.rotation.x += (phonePitch - npc.head.rotation.x) * Math.min(1, safeDt * 4);
+      npc.armR.rotation.x += (-1.05 - npc.armR.rotation.x) * Math.min(1, safeDt * 6);
+      npc.armR.rotation.z += (-0.45 - npc.armR.rotation.z) * Math.min(1, safeDt * 6);
+      npc.armL.rotation.x *= 0.35;
     } else {
-      // Relax back to upright
-      npc.torso.rotation.z *= Math.max(0, 1 - dt * 12);
-      npc.head.rotation.z *= Math.max(0, 1 - dt * 12);
+      // relax phone-specific z
+      npc.armR.rotation.z *= (1 - Math.min(1, safeDt * 6));
+    }
+
+    if (npc.stumbleT > 0) {
+      npc.stumbleT = Math.max(0, npc.stumbleT - safeDt);
+      npc.stumblePhase += safeDt * 18;
+      const k = this.clamp(npc.stumbleT / 0.42, 0, 1);
+      const wob = Math.sin(npc.stumblePhase) * 0.75 * k;
+
+      npc.torso.rotation.z = wob * 0.35;
+      npc.head.rotation.z = -wob * 0.25;
+      npc.armR.rotation.z += -wob * 0.25;
+      npc.armL.rotation.z += wob * 0.18;
+    } else {
+      // ease back to neutral
+      npc.torso.rotation.z *= (1 - Math.min(1, safeDt * 10));
+      npc.head.rotation.z *= (1 - Math.min(1, safeDt * 10));
+      npc.armL.rotation.z *= (1 - Math.min(1, safeDt * 10));
+      npc.armR.rotation.z *= (1 - Math.min(1, safeDt * 10));
     }
 
     // Spawn fade-in (Sim appears gradually in transition zone)
