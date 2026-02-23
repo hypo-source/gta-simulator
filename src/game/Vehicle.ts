@@ -106,6 +106,30 @@ export class Vehicle {
     return this.root.position.add(right.scale(2.0));
   }
 
+  /**
+   * 충돌 리졸버가 만들어낸 push 벡터를 이용해 속도를 벽에 대해 미끄러지도록 보정
+   * push는 (attempted -> corrected) 방향(=장애물 바깥 방향)
+   */
+  applyCollisionPush(push: Vector3, dt: number) {
+    const len = Math.hypot(push.x, push.z);
+    if (len < 1e-6) return;
+
+    const nx = push.x / len;
+    const nz = push.z / len;
+
+    // vel이 장애물 안쪽(=push의 반대)으로 향하면 그 성분을 제거
+    const vn = this.vel.x * nx + this.vel.z * nz;
+    if (vn < 0) {
+      this.vel.x -= nx * vn;
+      this.vel.z -= nz * vn;
+    }
+
+    // 살짝 감쇠해서 벽에 비비며 떨리는 현상 완화
+    const damp = Math.max(0, 1 - 6.0 * dt);
+    this.vel.x *= damp;
+    this.vel.z *= damp;
+  }
+
   update(dt: number, input: VehicleInput) {
     // Steering based on speed
     const speed = Math.hypot(this.vel.x, this.vel.z);
