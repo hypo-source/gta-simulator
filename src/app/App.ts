@@ -6,6 +6,7 @@ import { TouchControls } from "../game/TouchControls";
 import { WorldConfig } from "../world/WorldConfig";
 import { NPCManager } from "../npc/NPCManager";
 import { MissionManager } from "../game/MissionManager";
+import { Vehicle } from "../game/Vehicle";
 
 export class App {
   private host: EngineHost;
@@ -23,6 +24,10 @@ export class App {
   private fpsLastSampleMs = 0;
   private npc!: NPCManager;
   private mission!: MissionManager;
+  private vehicle!: Vehicle;
+  private inVehicle = false;
+  private interactQueued = false;
+  private playerBaseScale = 0.75;
 
   // Auto quality state
   private qLowMs = 0;
@@ -41,6 +46,12 @@ export class App {
     this.controls = new TouchControls(this.host.canvas);
     this.npc = new NPCManager(scene);
     this.mission = new MissionManager(scene, (pos, r) => this.world.isCircleOverlappingBuildings(pos, r));
+    this.vehicle = new Vehicle(scene);
+    this.playerBaseScale = this.player.root.scaling.x || 0.75;
+
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "KeyE" && !e.repeat) this.interactQueued = true;
+    });
 
     this.mountControlsHint();
     this.mountFpsHud();
@@ -55,13 +66,51 @@ export class App {
     this.host.run(() => {
       const dt = this.host.getDeltaSeconds();
       const input = this.controls.readInput();
-      this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
-      this.world.update(this.player.root.position);
-      // Let NPCs cheaply avoid building footprints & player overlap.
-      this.npc.update(dt, this.player.root.position, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
-      this.mission.update(dt, this.player.root.position);
+
+      // 탑승/하차 처리
+      if (this.interactQueued) {
+        this.interactQueued = false;
+
+        if (!this.inVehicle) {
+          const dist = this.vehicle.distanceTo(this.player.root.position);
+          if (dist <= 3.2) {
+            this.inVehicle = true;
+            // 카메라가 player.root를 타겟으로 쓰는 구조라 root disable은 피하고, 시각만 숨김
+            this.player.root.scaling.setAll(0.001);
+          }
+        } else {
+          this.inVehicle = false;
+          this.player.root.scaling.setAll(this.playerBaseScale);
+          this.player.root.position.copyFrom(this.vehicle.getExitPosition());
+        }
+      }
+
+      // 기준 위치 선택
+      const refPos = this.inVehicle ? this.vehicle.root.position : this.player.root.position;
+
+      if (this.inVehicle) {
+        // 차량 조작
+        const throttle = input.moveY;   // W:+1, S:-1
+        const steer = input.moveX;      // A:-1, D:+1
+        const boost = input.sprint;     // Shift
+        const handbrake = input.jump;   // Space (재사용)
+
+        this.vehicle.update(dt, { throttle, steer, boost, handbrake });
+
+        // 카메라/미션/월드가 player root 기반이라 player root를 차량에 붙여준다
+        this.player.root.position.copyFrom(this.vehicle.root.position);
+        this.player.root.rotation.y = this.vehicle.root.rotation.y;
+      } else {
+        this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
+      }
+
+      this.world.update(refPos);
+      this.npc.update(dt, refPos, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
+      this.mission.update(dt, refPos);
+
       this.camera.addZoomDelta(input.zoom);
       this.camera.updateWithInput(dt, input.lookY);
+
       this.updateFpsHud();
       this.updateMissionHud();
       this.updatePopupHud();
@@ -125,7 +174,8 @@ export class App {
     btn.style.opacity = isTouch ? "1" : "0.55";
 
     const startMission = () => {
-      this.mission.start(this.player.root.position);
+      const refPos = this.inVehicle ? this.vehicle.root.position : this.player.root.position;
+      this.mission.start(refPos);
       this.updateMissionHud();
       this.updatePopupHud();
       btn.textContent = "미션 재시작";
@@ -305,6 +355,7 @@ private updatePopupHud() {
         <div>줌 인/아웃: <b>마우스 휠</b></div>
         <div>피치 반전 토글: <b>I</b> (<span id="invertPitchState"></span>)</div>
         <div>미니 미션(배달/체크포인트) 시작/재시작: <b>M</b></div>
+        <div>탑승/하차: <b>E</b> (차량 근처)</div>
       </div>
       <div>
         <div><b>모바일</b> · 왼쪽 드래그: 이동 · 오른쪽 드래그: 회전</div>
