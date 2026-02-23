@@ -142,17 +142,87 @@ export class Player {
       rawMove.normalize();
       const fullDelta = rawMove.scale(speed * dt);
 
-      // Smoother collision: move in small sub-steps and resolve after each step.
-      // This greatly reduces "corner snagging" compared to axis-separate pushes.
+      // Wall-sliding character controller (2D circle vs building AABBs).
+      // We attempt the full move, resolve penetration, then remove the blocked
+      // component and re-try the remaining movement (a few iterations).
       const r = 0.55;
-      const maxStep = 1.2; // meters
-      const len = Math.sqrt(fullDelta.x * fullDelta.x + fullDelta.z * fullDelta.z);
-      const steps = Math.max(1, Math.ceil(len / maxStep));
-      const step = new Vector3(fullDelta.x / steps, 0, fullDelta.z / steps);
+      const maxIters = 3;
+      let remainX = fullDelta.x;
+      let remainZ = fullDelta.z;
 
-      for (let i = 0; i < steps; i++) {
-        this.root.position.addInPlace(step);
-        resolveCollision?.(this.root.position, r);
+      for (let iter = 0; iter < maxIters; iter++) {
+        if (remainX * remainX + remainZ * remainZ < 1e-8) break;
+
+        const startX = this.root.position.x;
+        const startZ = this.root.position.z;
+
+        // Move in sub-steps to reduce tunneling.
+        const maxStep = 1.15;
+        const len = Math.sqrt(remainX * remainX + remainZ * remainZ);
+        const steps = Math.max(1, Math.ceil(len / maxStep));
+        const stepX = remainX / steps;
+        const stepZ = remainZ / steps;
+
+        let collided = false;
+        let nX = 0;
+        let nZ = 0;
+
+        for (let i = 0; i < steps; i++) {
+          const beforeX = this.root.position.x;
+          const beforeZ = this.root.position.z;
+
+          this.root.position.x += stepX;
+          this.root.position.z += stepZ;
+
+          if (resolveCollision) {
+            const preResX = this.root.position.x;
+            const preResZ = this.root.position.z;
+            resolveCollision(this.root.position, r);
+
+            const corrX = this.root.position.x - preResX;
+            const corrZ = this.root.position.z - preResZ;
+            const corr2 = corrX * corrX + corrZ * corrZ;
+            if (corr2 > 1e-10) {
+              collided = true;
+              const corrLen = Math.sqrt(corr2);
+              nX += corrX / corrLen;
+              nZ += corrZ / corrLen;
+            }
+          }
+
+          // If we didn't actually move (fully blocked), stop early.
+          const movedX = this.root.position.x - beforeX;
+          const movedZ = this.root.position.z - beforeZ;
+          if (movedX * movedX + movedZ * movedZ < 1e-12) break;
+        }
+
+        // Compute how much we actually moved this iteration.
+        const movedX = this.root.position.x - startX;
+        const movedZ = this.root.position.z - startZ;
+
+        // Remaining after the attempted move.
+        remainX -= movedX;
+        remainZ -= movedZ;
+
+        if (!collided) break;
+
+        // Slide: remove the component into the averaged collision normal.
+        const n2 = nX * nX + nZ * nZ;
+        if (n2 > 1e-6) {
+          const inv = 1 / Math.sqrt(n2);
+          nX *= inv;
+          nZ *= inv;
+          const into = remainX * nX + remainZ * nZ;
+          if (into < 0) {
+            remainX -= into * nX;
+            remainZ -= into * nZ;
+          }
+          // Small damping to prevent micro-jitter on corners.
+          remainX *= 0.92;
+          remainZ *= 0.92;
+        } else {
+          break;
+        }
       }
     }
 

@@ -121,7 +121,11 @@ export class NPCManager {
     if (!mat.isFrozen) mat.freeze();
   }
 
-  update(dt: number, playerPos: Vector3) {
+  update(
+    dt: number,
+    playerPos: Vector3,
+    resolveCollision?: (pos: Vector3, radius: number) => void
+  ) {
     // compute player planar speed for adaptive handoff budget
     if (Number.isNaN(this.lastPlayerPos.x)) this.lastPlayerPos.copyFrom(playerPos);
     const pdx = playerPos.x - this.lastPlayerPos.x;
@@ -135,7 +139,7 @@ export class NPCManager {
 
     this.tryHandoffCrowdToSim(dt, playerPos);
 
-    this.updateSim(dt, playerPos);
+    this.updateSim(dt, playerPos, resolveCollision);
     this.updateThin(dt, this.crowd, "crowd", playerPos);
     this.updateThin(dt, this.fake, "fake", playerPos);
   }
@@ -243,7 +247,11 @@ export class NPCManager {
   return npc;
 }
 
-  private updateSim(dt: number, playerPos: Vector3) {
+  private updateSim(
+    dt: number,
+    playerPos: Vector3,
+    resolveCollision?: (pos: Vector3, radius: number) => void
+  ) {
     for (const npc of this.sim) {
       // Keep sim around player
       const dx = npc.root.position.x - playerPos.x;
@@ -305,6 +313,22 @@ export class NPCManager {
         const p = this.projectToWalkable(npc.root.position.x, npc.root.position.z);
         npc.root.position.x = p.x;
         npc.root.position.z = p.z;
+
+        // Keep sim NPCs out of building footprints as well (cheap, same as player).
+        // This prevents NPCs / player / buildings from visually overlapping.
+        if (resolveCollision) {
+          const beforeX = npc.root.position.x;
+          const beforeZ = npc.root.position.z;
+          resolveCollision(npc.root.position, 0.48);
+          const corrX = npc.root.position.x - beforeX;
+          const corrZ = npc.root.position.z - beforeZ;
+          const corr2 = corrX * corrX + corrZ * corrZ;
+          if (corr2 > 1e-6) {
+            // If we had to push out, gently steer away from the wall so we don't keep "pressing" into it.
+            const sign = Math.sin(npc.phase * 3.17) >= 0 ? 1 : -1;
+            npc.desiredYaw += sign * 0.55;
+          }
+        }
 
         // Avoid overlapping the player (cheap separation push)
         {

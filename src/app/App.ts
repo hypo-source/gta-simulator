@@ -57,7 +57,8 @@ export class App {
       const input = this.controls.readInput();
       this.player.update(dt, input, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       this.world.update(this.player.root.position);
-      this.npc.update(dt, this.player.root.position);
+      // Let NPCs cheaply avoid building footprints & player overlap.
+      this.npc.update(dt, this.player.root.position, (pos, r) => this.world.resolveCircleAgainstBuildings(pos, r));
       this.mission.update(dt, this.player.root.position);
       this.camera.addZoomDelta(input.zoom);
       this.camera.updateWithInput(dt, input.lookY);
